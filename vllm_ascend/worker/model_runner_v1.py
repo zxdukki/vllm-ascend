@@ -706,6 +706,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Run forward pass
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
+                                 query_lens=self.query_lens,
                                  num_tokens=num_input_tokens):
             with ProfileExecuteDuration().capture_async("forward"):
                 model_kwargs = {}

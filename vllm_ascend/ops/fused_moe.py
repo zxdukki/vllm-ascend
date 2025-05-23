@@ -31,6 +31,9 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
+from vllm.multistream.context import set_multistream_context, get_multistream_comm_context
+from vllm_ascend.multistream.base import MSEventKey
+from vllm_ascend.multistream.metadata import MultiStreamStepMetadata, MultiStreamMetadata
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
@@ -895,4 +898,33 @@ class AscendFusedMoE(FusedMoE):
 
         if self.enable_multistream_shared_expert and not is_prefill:
             return hidden_states, shared_output
+        return hidden_states
+
+    # ----------------------------------------- TBO-related --------------------------------------------
+
+    def _forward_ms_fused_moe_comp(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_prefill: bool,
+        real_top_k,
+        enable_force_load_balance: bool = False,
+    ):
+        hidden_states = self.quant_method.apply(
+            layer=self,
+            x=hidden_states,
+            router_logits=router_logits,
+            top_k=real_top_k,
+            renormalize=self.renormalize,
+            use_grouped_topk=self.use_grouped_topk,
+            global_num_experts=self.global_num_experts,
+            expert_map=self.expert_map,
+            topk_group=self.topk_group,
+            num_expert_group=self.num_expert_group,
+            custom_routing_function=self.custom_routing_function,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.e_score_correction_bias,
+            is_prefill=is_prefill,
+            enable_force_load_balance=enable_force_load_balance)
+
         return hidden_states
