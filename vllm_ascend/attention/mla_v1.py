@@ -803,31 +803,44 @@ class AscendMLAImpl(MLAAttentionImpl):
             # FIX: aicore move/copy should be also placed on the comm stream in dbo, 
             # otherwise it may affect the accuracy or disturb the overlap of next stage
             # TODO: use an elegant way here to avoid it
-            output_prefill = self._forward_prefill(
-                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
-                attn_metadata)
-            from vllm.multistream.context import get_multistream_comm_context
+            from vllm_ascend.multistream.context import get_multistream_comm_context
             current_ms_metadata = get_multistream_comm_context()
-            if current_ms_metadata is not None:
-                with torch.npu.stream(current_ms_metadata.comm_stream):
-                    output[num_decode_tokens:] = output_prefill
-                    current_ms_metadata.after_comm_event.record()
+            if current_ms_metadata is None:
+                output[num_decode_tokens:] = self._forward_prefill(
+                    prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
+                    attn_metadata)
             else:
-                output[num_decode_tokens:] = output_prefill
+                current_ms_metadata.before_comm_event.record()
+                with torch.npu.stream(current_ms_metadata.comm_stream):
+                    current_ms_metadata.before_comm_event.wait()
+                    output[num_decode_tokens:] = self._forward_prefill(
+                        prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
+                        attn_metadata)
+                    current_ms_metadata.after_comm_event.record()
+
+
+
         if has_decode:
             if self.running_in_graph:
                 return self._forward_decode(decode_ql_nope, decode_q_pe,
                                             decode_k_nope, decode_k_pe,
                                             kv_cache, attn_metadata)
             else:
-                from vllm.multistream.context import get_multistream_comm_context
-                current_ms_metadata = get_multistream_comm_context()   
-                output_decode = self._forward_decode(
-                     decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
-                     kv_cache, attn_metadata)
-            if current_ms_metadata is not None:
-                with torch.npu.stream(current_ms_metadata.comm_stream):
-                    output[:num_decode_tokens] = output_decode
-            else:
-                output[:num_decode_tokens] = output_decode
+
+                from vllm_ascend.multistream.context import get_multistream_comm_context
+                current_ms_metadata = get_multistream_comm_context()
+                if current_ms_metadata is None:
+                    output[:num_decode_tokens] = self._forward_decode(
+                        decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
+                        kv_cache, attn_metadata)
+                else:
+                    current_ms_metadata.before_comm_event.record()
+                    with torch.npu.stream(current_ms_metadata.comm_stream):
+                        current_ms_metadata.before_comm_event.wait()
+                        output[:num_decode_tokens] = self._forward_decode(
+                            decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
+                            kv_cache, attn_metadata)
+                        current_ms_metadata.after_comm_event.record()
+
+            
         return output_padded

@@ -2,7 +2,6 @@ from dataclasses import dataclass
 import torch
 from typing import Dict, List, Optional, Union, Tuple
 from vllm.sequence import IntermediateTensors
-from vllm.config import MultiStreamConfig
 from .base import MSAttentionMetadataSplitConfig, MSEventKey
 from vllm.attention.backends.abstract import AttentionMetadata
 
@@ -31,57 +30,21 @@ def split_micro_batches_tensors(input_tensors, split_index: int, keys: List[str]
         return [micro_batches_pre, micro_batches_post]
     else:
         raise NotImplementedError
-def make_multistream_metadata(
-        start_layer: int,
-        end_layer: int,
-        causal_lm: bool = True,
-        multistream_config: Optional[MultiStreamConfig] = None,
-):
-    if multistream_config is None:
-        return None
-    return MultiStreamMetadata(
-        calculate_stream=torch.npu.current_stream(),
-        communicate_stream=torch.npu.Stream(),
-        start_layer=start_layer,
-        end_layer=end_layer,
-        multistream_config=multistream_config,
-        event_keys=[MSEventKey.ATTN_COM_FINISH, MSEventKey.ATTN_AR_FINISH,
-                    MSEventKey.FFN_COM_FINISH, MSEventKey.FFN_AR_FINISH],
-        causal_lm=causal_lm,
-    )
-def make_multistream_metadata_ds(
-        start_layer: int,
-        end_layer: int,
-        causal_lm: bool = True,
-        multistream_config: Optional[MultiStreamConfig] = None,
-):
-    if multistream_config is None:
-        return None
-    event_keylist = [
-        MSEventKey.ATTN_COM_FINISH,
-        MSEventKey.ATTN_AR_FINISH,
-        MSEventKey.FFN_COM_FINISH,
-        MSEventKey.FFN_AR_FINISH,
-        MSEventKey.MOE_BEFORE_COMM,
-        MSEventKey.MOE_AFTER_COMM,
-        MSEventKey.MOE_SE_COMM_FINISH,
-        MSEventKey.MOE_SE_COMP_FINISH,
-        MSEventKey.MOE_GATE_FINISH,
-    ]
-    return MultiStreamMetadata(
-        calculate_stream=torch.npu.current_stream(),
-        communicate_stream=torch.npu.Stream(),
-        start_layer=start_layer,
-        end_layer=end_layer,
-        multistream_config=multistream_config,
-        event_keys=event_keylist,
-        causal_lm=causal_lm,
-    )
+
 @dataclass
 class MultiStreamStepMetadata:
     comm_stream: torch.npu.Stream = None
     before_comm_event: torch.npu.Event = None
     after_comm_event: torch.npu.Event = None
+
+@dataclass
+class MultiStreamConfig:
+    """Controls the behavior of multi-stream models."""
+    min_total_tokens_to_split: int = 256
+    min_prefill_tokens_to_split: int = 64
+    num_micro_batches: int = 2
+    imbalance_ratio: float = 0.1
+
 class MultiStreamMetadata:
     # direct stream
     calculate_stream = None
@@ -158,3 +121,33 @@ class MultiStreamMetadata:
             else:
                 batch.append(torch.cat(tensors, dim=0))
         return batch
+
+
+def make_multistream_metadata_ds(
+        start_layer: int,
+        end_layer: int,
+        causal_lm: bool = True,
+        multistream_config: Optional[MultiStreamConfig] = None,
+):
+    if multistream_config is None:
+        return None
+    event_keylist = [
+        MSEventKey.ATTN_COM_FINISH,
+        MSEventKey.ATTN_AR_FINISH,
+        MSEventKey.FFN_COM_FINISH,
+        MSEventKey.FFN_AR_FINISH,
+        MSEventKey.MOE_BEFORE_COMM,
+        MSEventKey.MOE_AFTER_COMM,
+        MSEventKey.MOE_SE_COMM_FINISH,
+        MSEventKey.MOE_SE_COMP_FINISH,
+        MSEventKey.MOE_GATE_FINISH,
+    ]
+    return MultiStreamMetadata(
+        calculate_stream=torch.npu.current_stream(),
+        communicate_stream=torch.npu.Stream(),
+        start_layer=start_layer,
+        end_layer=end_layer,
+        multistream_config=multistream_config,
+        event_keys=event_keylist,
+        causal_lm=causal_lm,
+    )

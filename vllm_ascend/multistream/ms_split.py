@@ -9,7 +9,7 @@ def compute_split_seq_index(
         num_tokens: int,
         imbalance_ratio: float = 0.1,
     )->Optional[list[int]]:
-    if attn_state == AscendAttentionState.PrefillOnly or attn_state == AscendAttentionState.ChunkedPrefill:
+    if attn_state != AscendAttentionState.DecodeOnly:
         assert query_lens is not None
         total_tokens = sum(query_lens)
         # the first index in last split
@@ -28,11 +28,10 @@ def compute_split_seq_index(
                 # TODO: split tokens in seq
                 else :
                     return [0, 0]
-    elif attn_state == AscendAttentionState.DecodeOnly:
+    else:
         tokens =  num_tokens // 2
         return [tokens, tokens]
-    else:
-        return [0, 0]
+   
 def split_attn_tensor_type(
         input_tensor: torch.Tensor,
         index: int, 
@@ -69,10 +68,10 @@ def model_input_split_v1_mla_attn(
     seq_lens = attn_metadata.prefill.seq_lens if attn_metadata.num_prefills>0 else attn_metadata.decode.seq_lens
     [seq_lens_pre, seq_lens_post] = split_attn_tensor_type(seq_lens,seq_index)
        
-    if attn_metadata.attn_state == AscendAttentionState.PrefillOnly:
+    if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache or attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
         # the attn_mla kernel in torch npu only accept 128*128 attn mask
         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
-        attn_state_pre = attn_state_post = AscendAttentionState.PrefillOnly
+        attn_state_pre = attn_state_post = attn_metadata.attn_state
     elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
         # should be none in decode only state
         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask

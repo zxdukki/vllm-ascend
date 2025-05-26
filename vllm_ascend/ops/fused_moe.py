@@ -37,7 +37,6 @@ else:
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
-from vllm.multistream.context import set_multistream_context,get_multistream_comm_context
 from vllm_ascend.multistream.base import MSEventKey
 from vllm_ascend.multistream.metadata import MultiStreamStepMetadata, MultiStreamMetadata
 import vllm_ascend.envs as envs_ascend
