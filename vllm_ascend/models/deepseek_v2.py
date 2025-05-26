@@ -74,11 +74,12 @@ from vllm_ascend.utils import dispose_tensor
 from vllm_ascend.multistream.context import (set_multistream_context,get_multistream_layer_context, 
                                       advance_step_multistream_layer_context, get_multistream_comm_context)
 from vllm_ascend.multistream.layers import (MultiStreamPreTransformerLayer, MultiStreamPostTransformerLayer)
-from vllm_ascend.multistream.metadata import make_multistream_metadata_ds, MultiStreamStepMetadata
+from vllm_ascend.multistream.metadata import make_multistream_metadata_ds, MultiStreamStepMetadata, MultiStreamConfig
 from vllm_ascend.multistream.base import MSEventKey
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
+VLLM_ENABLE_MS: bool = envs_ascend.VLLM_ENABLE_MS
 
 
 class CustomDeepseekV2MLP(nn.Module):
@@ -348,8 +349,10 @@ class CustomDeepseekV2MoE(nn.Module):
             dist.all_gather(list(chunk_hidden_states), hidden_states,
                             self.tp_group)
             final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
-            if num_tokens < self.tp_size:
-                final_hidden_states = final_hidden_states[:num_tokens]
+            #if num_tokens < self.tp_size:
+            #    final_hidden_states = final_hidden_states[:num_tokens]
+            if num_tokens > 0:
+                final_hidden_states = final_hidden_states[:-num_tokens]
         else:
             final_hidden_states = hidden_states
 
@@ -692,6 +695,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 )
             
             with set_multistream_context(context, i):
+                context = get_forward_context()
+                layer_index, ms_metadata, attn_metadata = get_multistream_layer_context()
+                context.attn_metadata = attn_metadata[i]
+
                 # input layernorm
                 hidden_states[i], residual[i] = self._forward_ms_op_input_layernorm(hidden_states[i], residual[i])
                 # attention and tp allreducea
@@ -715,7 +722,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
                 num_token, hidden_dim = hidden_states[i].shape
                 hidden_states[i] = hidden_states[i].view(-1, hidden_dim)
-                num_tokens.append(num_token)
+                #num_tokens.append(num_token)
                 hidden_dims.append(hidden_dim)
                 if self.mlp.n_shared_experts is not None:
                     # TODO: we can move shared expert computation into next block if reduce results is false
@@ -737,13 +744,20 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 enable_force_load_balance = False
 
             if self.mlp.tp_size > 1:
-                if num_tokens[i] < self.mlp.tp_size:
-                    target_size = self.mlp.tp_size
-                    new_hidden_states = torch.empty([target_size, hidden_dims[i]],
-                                                    dtype=hidden_states[i].dtype,
-                                                    device=hidden_states[i].device)
-                    new_hidden_states[:num_tokens[i]] = hidden_states[i]
-                    hidden_states[i] = new_hidden_states
+                #if num_tokens[i] < self.mlp.tp_size:
+                #    target_size = self.mlp.tp_size
+                #    new_hidden_states = torch.empty([target_size, hidden_dims[i]],
+                #                                    dtype=hidden_states[i].dtype,
+                #                                    device=hidden_states[i].device)
+                #    new_hidden_states[:num_tokens[i]] = hidden_states[i]
+                #    hidden_states[i] = new_hidden_states
+                num_token, _ = hidden_states[i].shape
+                padded_num_tokens = (self.mlp.tp_size -
+                                 num_token % self.mlp.tp_size) % self.mlp.tp_size
+                if padded_num_tokens > 0:
+                    hidden_states[i] = nn.functional.pad(hidden_states[i],
+                                                  (0, 0, 0, padded_num_tokens))
+                num_tokens.append(padded_num_tokens)
                 chunk_hidden_state = torch.tensor_split(hidden_states[i],
                                                         self.mlp.tp_size,
                                                         dim=0)
@@ -764,7 +778,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             if VLLM_ENABLE_MC2 and not is_prefill:
                 ...
 
-            hidden_states[i] =  self.mlp.experts._forward_ms_fused_moe_comp(hidden_states[i], router_logits[i], is_prefill, real_top_k, enable_force_load_balance)
+            hidden_states[i] =  self.mlp.experts._forward_ms_fused_moe_comp(local_hidden_states, router_logits[i], is_prefill, real_top_k, enable_force_load_balance)
 
             if VLLM_ENABLE_MC2 and not is_prefill:
                 ...
@@ -898,7 +912,10 @@ class CustomDeepseekV2Model(nn.Module):
                 ["hidden_states", "residual"], config.hidden_size))
         
         # tbo related members
-        self.multistream_config = vllm_config.model_config.multistream_config
+        if VLLM_ENABLE_MS:
+            self.multistream_config = MultiStreamConfig()
+        else:
+            self.multistream_config = None
         self.use_mla = model_config.use_mla
         self.multistream_metadata = make_multistream_metadata_ds(
             start_layer=self.start_layer + self.first_k_dense_replace,
@@ -980,13 +997,14 @@ class CustomDeepseekV2Model(nn.Module):
             return False
         num_microbatchs = self.multistream_config.num_micro_batches
         # check whether there is a dp rank that not use dual batch
-        if dp_metadata is not None:
+        '''if dp_metadata is not None:
             for i in range(num_microbatchs):
                 cu_tokens = dp_metadata.cu_dbo_tokens_across_dp_cpu[i]
                 if torch.any(cu_tokens == 0).item():
                     return False
         [token_index, seq_index] = compute_split_seq_index(attn_metadata.query_lens,
-                                                           attn_metadata.attn_state, attn_metadata.num_decode_tokens)         
+                                                           attn_metadata.attn_state, attn_metadata.num_decode_tokens)
+        '''         
         if token_index == 0 or seq_index == 0 or seq_index == len(attn_metadata.query_lens):
             return False
         # check whether the total tokens exceed the threshold
