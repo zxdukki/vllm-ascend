@@ -1,10 +1,15 @@
+from typing import List, Tuple, Union, Optional
+
 import torch
-from typing import List, Union, Tuple
+from vllm_ascend.multistream.context import (get_multistream_layer_context,
+                                             reset_multistream_layer_context,
+                                             set_multistream_layer_context)
+
 from vllm.forward_context import get_forward_context
+
 from .base import MSEventKey
 from .metadata import MultiStreamMetadata
-from vllm_ascend.multistream.context import (set_multistream_layer_context, reset_multistream_layer_context,
-                      get_multistream_layer_context)
+
 
 # TODO: move this part to vllm
 class MultiStreamPreTransformerLayer(torch.nn.Module):
@@ -29,8 +34,8 @@ class MultiStreamPostTransformerLayer(torch.nn.Module):
         super().__init__()
         self.multistream_metadata = multistream_metadata
     def forward(self, input_tensors: Union[List[Tuple[torch.Tensor]], List[torch.Tensor], List[List[torch.Tensor]]],
-                wait_layer_index: int = None):
-        if self.multistream_metadata is None:
+                wait_layer_index: Optional[int] = None):
+        if self.multistream_metadata is None or self.multistream_metadata.ms_config is None:
             return input_tensors
         layer_index, ms_metadata, ms_attn_metadata = get_multistream_layer_context()
         if layer_index >= 0:

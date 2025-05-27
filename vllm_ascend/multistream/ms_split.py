@@ -1,8 +1,11 @@
-import torch
-from typing import Optional, Any, List
+from typing import Any, List, Optional
+
 import numpy as np
+import torch
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
+
+
 def compute_split_seq_index(
         query_lens: Optional[list[int]],
         attn_state: AscendAttentionState,
@@ -31,6 +34,7 @@ def compute_split_seq_index(
     else:
         tokens =  num_tokens // 2
         return [tokens, tokens]
+    return [0, 0]
    
 def split_attn_tensor_type(
         input_tensor: torch.Tensor,
@@ -49,6 +53,7 @@ def model_input_split_v1_mla_attn(
         ms_split_config: MSAttentionMetadataSplitConfig,
     ) -> List[Any]:
     assert 0 < ms_split_config.num_micro_batches < 3
+    assert attn_metadata is not None
     [token_index, seq_index] = compute_split_seq_index(attn_metadata.query_lens,
                                                        attn_metadata.attn_state, attn_metadata.num_decode_tokens)
     if token_index == 0 or seq_index == 0 or seq_index == len(attn_metadata.query_lens):
@@ -88,7 +93,8 @@ def model_input_split_v1_mla_attn(
             attn_mask_pre = None
             attn_state_post = AscendAttentionState.ChunkedPrefill
             attn_mask_post = attn_metadata.attn_mask[token_index:, :max(seq_lens_post)].contiguous()
-    from vllm_ascend.attention.mla_v1 import AscendMLAPrefillMetadata, AscendMLADecodeMetadata
+    from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
+                                              AscendMLAPrefillMetadata)
     if num_prefills_pre > 0:
         # split metadata.prefill
         [input_positions_pre, input_positions_post] = split_attn_tensor_type(attn_metadata.prefill.input_positions, token_index - attn_metadata.num_decode_tokens)
