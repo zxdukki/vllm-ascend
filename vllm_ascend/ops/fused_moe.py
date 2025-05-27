@@ -37,8 +37,6 @@ else:
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
-from vllm_ascend.multistream.base import MSEventKey
-from vllm_ascend.multistream.metadata import MultiStreamStepMetadata, MultiStreamMetadata
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 
@@ -746,6 +744,7 @@ class AscendFusedMoE(FusedMoE):
             real_top_k,
             enable_force_load_balance: bool = False,
             ):
+        assert self.quant_method is not None
         final_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,

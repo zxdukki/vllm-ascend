@@ -7,7 +7,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 # vllm v1 use get_forward_context to get the attn_metadata, 
-# we update it to the splitted version if enable dbo
+# we can use this decorator to update the attn metadata
 def set_multistream_support():
     def decorator(func):
         def wrapper():

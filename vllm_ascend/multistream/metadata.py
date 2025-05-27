@@ -1,12 +1,16 @@
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Union
+
 import torch
-from typing import Dict, List, Optional, Union, Tuple
-from vllm.sequence import IntermediateTensors
-from .base import MSAttentionMetadataSplitConfig, MSEventKey
+
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.sequence import IntermediateTensors
+
+from .base import MSAttentionMetadataSplitConfig, MSEventKey
+
 
 # TODO: move this part to vllm
-def split_micro_batches_tensors(input_tensors, split_index: int, keys: List[str] = None):
+def split_micro_batches_tensors(input_tensors, split_index: int, keys: Optional[List[str]] = None):
     if isinstance(input_tensors, list):
         micro_batches = []
         for tensor in input_tensors:
@@ -70,8 +74,10 @@ class MultiStreamMetadata:
         self.end_layer = end_layer
         self.ms_config = multistream_config
         self.causal_lm = causal_lm
-        self._build_events(event_keys)
-        self._build_ms_split_config()
+        if self.ms_config is not None:
+            self._build_events(event_keys)
+            self._build_ms_split_config()
+
     def _build_events(self, event_keys):
         for i in range(self.start_layer - 1, self.end_layer):
             self.ms_events[i] = {}
@@ -114,7 +120,7 @@ class MultiStreamMetadata:
                             ) -> List[torch.Tensor]:
         if input_tensors is None or isinstance(input_tensors[0], torch.Tensor):
             return input_tensors
-        batch = []
+        batch: List[Optional[torch.Tensor]] = []
         for tensors in input_tensors:
             if tensors is None or tensors[0] is None:
                 batch.append(None)
