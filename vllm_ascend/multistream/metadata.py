@@ -2,22 +2,23 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.sequence import IntermediateTensors
 
 from .base import MSAttentionMetadataSplitConfig, MSEventKey
 
 
-# TODO: move this part to vllm
-def split_micro_batches_tensors(input_tensors, split_index: int, keys: Optional[List[str]] = None):
+def split_micro_batches_tensors(input_tensors,
+                                split_index: int,
+                                keys: Optional[List[str]] = None):
     if isinstance(input_tensors, list):
         micro_batches = []
         for tensor in input_tensors:
             if tensor is None:
                 micro_batches.append([None, None])
             else:
-                micro_batches.append([tensor[:split_index], tensor[split_index:]])
+                micro_batches.append(
+                    [tensor[:split_index], tensor[split_index:]])
         return micro_batches
     elif isinstance(input_tensors, torch.Tensor):
         return [input_tensors[:split_index], input_tensors[split_index:]]
@@ -35,11 +36,13 @@ def split_micro_batches_tensors(input_tensors, split_index: int, keys: Optional[
     else:
         raise NotImplementedError
 
+
 @dataclass
 class MultiStreamStepMetadata:
     comm_stream: torch.npu.Stream = None
     before_comm_event: torch.npu.Event = None
     after_comm_event: torch.npu.Event = None
+
 
 @dataclass
 class MultiStreamConfig:
@@ -48,6 +51,7 @@ class MultiStreamConfig:
     min_prefill_tokens_to_split: int = 64
     num_micro_batches: int = 2
     imbalance_ratio: float = 0.1
+
 
 class MultiStreamMetadata:
     # direct stream
@@ -58,66 +62,84 @@ class MultiStreamMetadata:
     ms_events: Dict[int, Dict[int, Dict[MSEventKey, torch.npu.Event]]] = {}
     # multi-stream-flag
     enable_multi_stream: bool = False
-    
-    def __init__(self,
-                 calculate_stream: torch.npu.Stream,
-                 communicate_stream: torch.npu.Stream,
-                 start_layer: int,
-                 end_layer: int,
-                 event_keys: List[MSEventKey],
-                 multistream_config: Optional[MultiStreamConfig],
-                 causal_lm: bool = True,
-                 ):
+
+    def __init__(
+        self,
+        calculate_stream: torch.npu.Stream,
+        communicate_stream: torch.npu.Stream,
+        start_layer: int,
+        end_layer: int,
+        event_keys: List[MSEventKey],
+        multistream_config: Optional[MultiStreamConfig],
+        causal_lm: bool = True,
+    ):
         self.calculate_stream = calculate_stream
         self.communicate_stream = communicate_stream
         self.start_layer = start_layer
         self.end_layer = end_layer
         self.ms_config = multistream_config
         self.causal_lm = causal_lm
-        if self.ms_config is not None:
-            self._build_events(event_keys)
-            self._build_ms_split_config()
+        self._build_events(event_keys)
+        self._build_ms_split_config()
 
     def _build_events(self, event_keys):
-        for i in range(self.start_layer - 1, self.end_layer):
-            self.ms_events[i] = {}
-            for j in range(self.ms_config.num_micro_batches):
-                self.ms_events[i][j] = {}
-                for key in event_keys:
-                    self.ms_events[i][j][key] = torch.npu.Event()
+        if self.ms_config is not None:
+            for i in range(self.start_layer - 1, self.end_layer):
+                self.ms_events[i] = {}
+                for j in range(self.ms_config.num_micro_batches):
+                    self.ms_events[i][j] = {}
+                    for key in event_keys:
+                        self.ms_events[i][j][key] = torch.npu.Event()
+
     def _build_ms_split_config(self):
-        self.ms_split_config = MSAttentionMetadataSplitConfig(
-            num_micro_batches=self.ms_config.num_micro_batches,
-            min_total_tokens_to_split=self.ms_config.min_total_tokens_to_split,
-            min_prefill_tokens_to_split=self.ms_config.min_prefill_tokens_to_split,
-        )
-    def try_wait_event(self, layer_index: int, micro_batch_index: int, event_key: MSEventKey):
+        if self.ms_config is not None:
+            self.ms_split_config = MSAttentionMetadataSplitConfig(
+                num_micro_batches=self.ms_config.num_micro_batches,
+                min_total_tokens_to_split=self.ms_config.
+                min_total_tokens_to_split,
+                min_prefill_tokens_to_split=self.ms_config.
+                min_prefill_tokens_to_split,
+            )
+
+    def try_wait_event(self, layer_index: int, micro_batch_index: int,
+                       event_key: MSEventKey):
         self.ms_events[layer_index][micro_batch_index][event_key].wait()
-    def try_record_event(self, layer_index: int, micro_batch_index: int, event_key: MSEventKey):
+
+    def try_record_event(self, layer_index: int, micro_batch_index: int,
+                         event_key: MSEventKey):
         self.ms_events[layer_index][micro_batch_index][event_key].record()
-    def split_micro_batch(self,
-                          attn_metadata: "AttentionMetadata",
-                          intput_tensors: List[torch.Tensor],
-                          intermediate_tensors: Optional[IntermediateTensors] = None,
-                          intermediate_tensors_keys: Optional[List[str]] = None,
-        ) -> Tuple[bool,
-             Union[AttentionMetadata, List[AttentionMetadata]],
-             Union[List[torch.Tensor], List[List[torch.Tensor]]],
-             Union[IntermediateTensors, List[IntermediateTensors]]]:
-        attn_metadata = attn_metadata.split_metadata_for_multistream(self.ms_split_config)
+
+    def split_micro_batch(
+        self,
+        attn_metadata: "AttentionMetadata",
+        intput_tensors: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors_keys: Optional[List[str]] = None,
+    ) -> Tuple[bool, Union[AttentionMetadata, List[AttentionMetadata]], Union[
+            List[torch.Tensor], List[List[torch.Tensor]]], Union[
+                IntermediateTensors, List[IntermediateTensors]]]:
+        attn_metadata = attn_metadata.split_metadata_for_multistream(
+            self.ms_split_config)
         if len(attn_metadata) == 1:
-            return False, attn_metadata[0], intput_tensors, intermediate_tensors
+            return False, attn_metadata[
+                0], intput_tensors, intermediate_tensors
         split_index = attn_metadata[0].slot_mapping.shape[0]
-        input_tensors = split_micro_batches_tensors(intput_tensors, split_index)
+        input_tensors = split_micro_batches_tensors(intput_tensors,
+                                                    split_index)
         if intermediate_tensors is not None:
-            inter_tensors_list = split_micro_batches_tensors(intermediate_tensors.tensors, split_index, intermediate_tensors_keys)
+            inter_tensors_list = split_micro_batches_tensors(
+                intermediate_tensors.tensors, split_index,
+                intermediate_tensors_keys)
             intermediate_tensors = [
-                IntermediateTensors(inter_tensors) for inter_tensors in inter_tensors_list
+                IntermediateTensors(inter_tensors)
+                for inter_tensors in inter_tensors_list
             ]
         return True, attn_metadata, input_tensors, intermediate_tensors
-    def merge_micro_batches(self,
-                            input_tensors: Union[List[torch.Tensor], List[List[torch.Tensor]]]
-                            ) -> List[torch.Tensor]:
+
+    def merge_micro_batches(
+        self, input_tensors: Union[List[torch.Tensor],
+                                   List[List[torch.Tensor]]]
+    ) -> List[torch.Tensor]:
         if input_tensors is None or isinstance(input_tensors[0], torch.Tensor):
             return input_tensors
         batch: List[Optional[torch.Tensor]] = []
@@ -130,10 +152,10 @@ class MultiStreamMetadata:
 
 
 def make_multistream_metadata_ds(
-        start_layer: int,
-        end_layer: int,
-        causal_lm: bool = True,
-        multistream_config: Optional[MultiStreamConfig] = None,
+    start_layer: int,
+    end_layer: int,
+    causal_lm: bool = True,
+    multistream_config: Optional[MultiStreamConfig] = None,
 ):
     if multistream_config is None:
         return None

@@ -733,17 +733,16 @@ class AscendFusedMoE(FusedMoE):
 
         return final_hidden_states
 
-
     # ----------------------------------------- TBO-related --------------------------------------------
-        
+
     def _forward_ms_fused_moe_comp(
-            self,
-            hidden_states: torch.Tensor,
-            router_logits: torch.Tensor,
-            is_prefill: bool,
-            real_top_k,
-            enable_force_load_balance: bool = False,
-            ):
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_prefill: bool,
+        real_top_k,
+        enable_force_load_balance: bool = False,
+    ):
         assert self.quant_method is not None
         final_hidden_states = self.quant_method.apply(
             layer=self,
@@ -762,5 +761,5 @@ class AscendFusedMoE(FusedMoE):
             is_prefill=is_prefill,
             enable_force_load_balance=enable_force_load_balance,
             dp_size=self.dp_size)
-        
+
         return final_hidden_states

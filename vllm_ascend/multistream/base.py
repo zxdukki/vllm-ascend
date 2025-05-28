@@ -11,10 +11,12 @@ class MSEventKey(Enum):
     # events for MOE dispatch and combine
     MOE_BEFORE_COMM = 4
     MOE_AFTER_COMM = 5
-    # events for shared expert 
+    # events for shared expert
     MOE_SE_COMM_FINISH = 6
     MOE_SE_COMP_FINISH = 7
     MOE_GATE_FINISH = 8
+
+
 @dataclass
 class MSAttentionMetadataSplitConfig:
     """
