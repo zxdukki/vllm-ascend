@@ -30,23 +30,9 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 import torch.distributed as dist
 import torch_npu
-import vllm_ascend.envs as envs_ascend
+import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
-from vllm_ascend.multistream.base import MSEventKey
-from vllm_ascend.multistream.context import (
-    advance_step_multistream_layer_context, get_multistream_comm_context,
-    get_multistream_layer_context, set_multistream_context)
-from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
-                                            MultiStreamPreTransformerLayer)
-from vllm_ascend.multistream.metadata import (MultiStreamConfig,
-                                              MultiStreamStepMetadata,
-                                              make_multistream_metadata_ds)
-from vllm_ascend.multistream.ms_split import compute_split_seq_index
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
-from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-
-import vllm.envs as envs
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
@@ -80,19 +66,18 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.multistream.base import MSEventKey
+from vllm_ascend.multistream.context import (
+    advance_step_multistream_layer_context, get_multistream_comm_context,
+    get_multistream_layer_context, set_multistream_context)
+from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
+                                            MultiStreamPreTransformerLayer)
+from vllm_ascend.multistream.metadata import (MultiStreamConfig,
+                                              MultiStreamStepMetadata,
+                                              make_multistream_metadata_ds)
+from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import dispose_tensor
-
-from vllm_ascend.multistream.context import (
-    set_multistream_context, get_multistream_layer_context,
-    advance_step_multistream_layer_context, get_multistream_comm_context)
-from vllm_ascend.multistream.layers import (MultiStreamPreTransformerLayer,
-                                            MultiStreamPostTransformerLayer)
-from vllm_ascend.multistream.metadata import make_multistream_metadata_ds, MultiStreamStepMetadata, MultiStreamConfig
-from vllm_ascend.multistream.base import MSEventKey
-from vllm_ascend.multistream.ms_split import compute_split_seq_index
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 VLLM_ENABLE_DBO: bool = envs_ascend.VLLM_ENABLE_DBO
@@ -734,7 +719,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self,
         positions: List[torch.Tensor],
         hidden_states: List[torch.Tensor],
-        residual: Optional[List[torch.Tensor]],
+        residual: List[torch.Tensor],
         attn_metadata: List[AttentionMetadata],
         kv_cache: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
@@ -746,6 +731,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         assert isinstance(self.mlp, CustomDeepseekV2MoE)
         assert len(positions) == num_micro_batchs
         assert len(hidden_states) == num_micro_batchs
+        assert residual is not None
         assert attn_metadata is not None
         num_tokens = []
         hidden_dims = []
@@ -1010,10 +996,10 @@ class CustomDeepseekV2Model(nn.Module):
                 ["hidden_states", "residual"], config.hidden_size))
 
         # tbo related members
+        self.multistream_config: Optional[MultiStreamConfig] = None
         if VLLM_ENABLE_DBO:
             self.multistream_config = MultiStreamConfig()
-        else:
-            self.multistream_config = None
+
         self.use_mla = model_config.use_mla
         self.multistream_metadata = make_multistream_metadata_ds(
             start_layer=self.start_layer + self.first_k_dense_replace,
@@ -1083,31 +1069,22 @@ class CustomDeepseekV2Model(nn.Module):
     def can_run_ms(self):
         # currently we only enable prefill overlap
         attn_metadata = get_forward_context().attn_metadata
-        # dp_metadata = get_forward_context().dp_metadata
         # profile run
-        if self.multistream_config is None or attn_metadata is None:
+        if attn_metadata is None or attn_metadata.num_prefills == 0:
+            return False
+        else:
+            [token_index, seq_index
+             ] = compute_split_seq_index(attn_metadata.query_lens,
+                                         attn_metadata.attn_state,
+                                         attn_metadata.num_decode_tokens)
+            if token_index == 0 or seq_index == 0 or seq_index == len(
+                    attn_metadata.query_lens):
+                return False
+
+        if self.multistream_config is None:
             return False
         # support mla attention and V1 engine at present
         if not self.use_mla or not envs.VLLM_USE_V1:
-            return False
-        # disable decode dbo
-        if attn_metadata.num_prefills == 0:
-            return False
-        # check whether there is a dp rank that not use dual batch
-        '''
-        num_microbatchs = self.multistream_config.num_micro_batches
-        if dp_metadata is not None:
-            for i in range(num_microbatchs):
-                cu_tokens = dp_metadata.cu_dbo_tokens_across_dp_cpu[i]
-                if torch.any(cu_tokens == 0).item():
-                    return False
-        '''
-        [token_index,
-         seq_index] = compute_split_seq_index(attn_metadata.query_lens,
-                                              attn_metadata.attn_state,
-                                              attn_metadata.num_decode_tokens)
-        if token_index == 0 or seq_index == 0 or seq_index == len(
-                attn_metadata.query_lens):
             return False
         # check whether the total tokens exceed the threshold
         if attn_metadata.num_actual_tokens < self.multistream_config.min_total_tokens_to_split:

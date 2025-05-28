@@ -4,12 +4,6 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, TypeVar
 import numpy as np
 import torch
 import torch_npu
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
-from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
-from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
@@ -19,10 +13,10 @@ from vllm.model_executor.layers.linear import (LinearBase,
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
-
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
+from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
