@@ -384,10 +384,8 @@ class CustomDeepseekV2MoE(nn.Module):
     def _forward_ms_op_tp_allgather(
         self,
         hidden_states: torch.Tensor,
-        shared_output: torch.Tensor,
         chunk_hidden_states: torch.Tensor,
         num_tokens: int = 0,
-        hidden_dim: int = 0,
     ):
 
         if self.tp_size > 1:
@@ -413,11 +411,6 @@ class CustomDeepseekV2MoE(nn.Module):
 
         else:
             final_hidden_states = hidden_states
-
-            if shared_output is not None:
-                final_hidden_states = final_hidden_states + shared_output
-            final_hidden_states = final_hidden_states.view(
-                num_tokens, hidden_dim)
 
         return final_hidden_states
 
@@ -793,7 +786,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
                 num_token, hidden_dim = hidden_states[i].shape
                 hidden_states[i] = hidden_states[i].view(-1, hidden_dim)
-                #num_tokens.append(num_token)
+                num_tokens.append(num_token)
                 hidden_dims.append(hidden_dim)
                 if self.mlp.n_shared_experts is not None:
                     # TODO: we can move shared expert computation into next block if reduce results is false
@@ -829,7 +822,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 if padded_num_tokens > 0:
                     hidden_states[i] = nn.functional.pad(
                         hidden_states[i], (0, 0, 0, padded_num_tokens))
-                num_tokens.append(padded_num_tokens)
                 chunk_hidden_state = torch.tensor_split(hidden_states[i],
                                                         self.mlp.tp_size,
                                                         dim=0)
@@ -887,10 +879,14 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             )
             with set_multistream_context(context, i):
                 hidden_states[i] = self.mlp._forward_ms_op_tp_allgather(
-                    hidden_states[i], shared_outputs[i],
-                    chunk_hidden_states[i], num_tokens[i], hidden_dims[i])
+                    hidden_states[i], chunk_hidden_states[i],
+                    padded_num_tokens)
             with torch.npu.stream(ms_metadata.communicate_stream):
                 # last
+                if shared_output is not None:
+                    hidden_states[i] = hidden_states[i] + shared_outputs[i]
+                hidden_states[i] = hidden_states[i].view(
+                    num_tokens[i], hidden_dims[i])
                 if isinstance(self.mlp, CustomDeepseekV2MLP
                               ) and hidden_states[i].dtype == torch.float16:
                     # Fix FP16 overflow
