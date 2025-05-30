@@ -862,8 +862,14 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
+            previous_hidden_states, previous_residual = hidden_states, residual
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+            # Dispose hidden_states and residual from the previous layer
+            # to save npu memory because they're no longer used.
+            dispose_tensor(previous_hidden_states)
+            dispose_tensor(previous_residual)
+
         return hidden_states, residual
 
     def _forward_ms_op_attn(
