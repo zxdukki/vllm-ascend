@@ -120,7 +120,6 @@ class AscendMLAMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
     query_lens: Optional[list[int]] = None
-    seq_lens: Optional[torch.Tensor] = None
     # The dimension of the attention heads
     head_dim: Optional[int] = None
     attn_mask: torch.Tensor = None
@@ -355,7 +354,6 @@ class AscendMLAMetadataBuilder:
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
             query_lens=query_lens.tolist(),
-            seq_lens=seq_lens,
             slot_mapping=slot_mapping,
             head_dim=self.runner.model_config.get_head_size(),
             num_decodes=self._num_decodes,

@@ -1021,9 +1021,11 @@ class CustomDeepseekV2Model(nn.Module):
         return hidden_states
 
     def can_run_ms(self):
-        # currently we only enable prefill overlap
         attn_metadata = get_forward_context().attn_metadata
-        # profile run
+        # support mla attention and V1 engine at present
+        if not self.use_mla or not envs.VLLM_USE_V1:
+            return False
+        # enable prefill overlap
         if attn_metadata is None or attn_metadata.num_prefills == 0:
             return False
         else:
@@ -1036,9 +1038,6 @@ class CustomDeepseekV2Model(nn.Module):
                 return False
 
         if self.multistream_config is None:
-            return False
-        # support mla attention and V1 engine at present
-        if not self.use_mla or not envs.VLLM_USE_V1:
             return False
         # check whether the total tokens exceed the threshold
         if attn_metadata.num_actual_tokens < self.multistream_config.min_total_tokens_to_split:
