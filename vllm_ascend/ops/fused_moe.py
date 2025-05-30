@@ -697,6 +697,74 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                               expert_map=expert_map,
                                               ep_group=get_ep_group())
 
+    def _apply_select_experts(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        is_prefill: bool = False,
+        **kwargs,
+    ):
+        # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
+        if global_num_experts == 256:
+            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
+                router_logits,
+                k=top_k,  # topk当前写8
+                bias=e_score_correction_bias,
+                k_group=topk_group,  # fix: 4
+                group_count=num_expert_group,  # fix 8
+                group_select_mode=1,  # 0: group中的最大; 1: topk2.sum(fix)
+                renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
+                norm_type=1,  # 0: softmax; 1: sigmoid(fix)
+                # out_flag=False, # todo new api; 第三个输出是否输出
+                # y2_flag=False, # old api; 第三个输出是否输出
+                routed_scaling_factor=1,
+                eps=float(1e-20))
+        else:
+            topk_weights, topk_ids = select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                top_k=top_k,
+                use_grouped_topk=use_grouped_topk,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+            )
+        return topk_weights, topk_ids
+    
+    def _apply_dispatch(
+                    self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        is_prefill: bool = False,
+        **kwargs,
+    ):
+        
+
 
 class AscendFusedMoE(FusedMoE):
 
@@ -886,7 +954,39 @@ class AscendFusedMoE(FusedMoE):
 
     # ----------------------------------------- TBO-related --------------------------------------------
 
-    def _forward_ms_fused_moe_comp(
+    def _forward_ms_fused_moe_dispatch(self,
+                                       hidden_states: torch.Tensor,
+                                       router_logits: torch.Tensor,
+                                       is_prefill: bool,
+                                       enable_force_load_balance: bool = False,
+                                       top_k=None):
+        assert self.quant_method is not None
+
+        if top_k:
+            real_top_k = top_k
+        else:
+            real_top_k = self.top_k
+
+        if VLLM_ENABLE_MC2 and not is_prefill:
+            ...
+
+        # dispatch logic in quant method
+
+    def _forward_ms_fused_moe_combine(self,
+                                      hidden_states: torch.Tensor,
+                                      router_logits: torch.Tensor,
+                                      is_prefill: bool,
+                                      enable_force_load_balance: bool = False,
+                                      top_k=None):
+
+        if VLLM_ENABLE_MC2 and not is_prefill:
+            ...
+
+        if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        return hidden_states
+
+    def _forward_ms_fused_moe(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -895,22 +995,45 @@ class AscendFusedMoE(FusedMoE):
         enable_force_load_balance: bool = False,
     ):
         assert self.quant_method is not None
-        final_hidden_states = self.quant_method.apply(
-            layer=self,
-            x=hidden_states,
-            router_logits=router_logits,
-            top_k=real_top_k,
-            renormalize=self.renormalize,
-            use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
-            expert_map=self.expert_map,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias,
-            is_prefill=is_prefill,
-            enable_force_load_balance=enable_force_load_balance,
-            dp_size=self.dp_size)
+
+        if VLLM_ENABLE_MC2 and not is_prefill or get_ep_group().world_size == 1:
+            # currently we donot overlap if using mc2
+            final_hidden_states = self.quant_method.apply(
+                layer=self,
+                x=hidden_states,
+                router_logits=router_logits,
+                top_k=real_top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                global_num_experts=self.global_num_experts,
+                expert_map=self.expert_map,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                e_score_correction_bias=self.e_score_correction_bias,
+                is_prefill=is_prefill,
+                enable_force_load_balance=enable_force_load_balance,
+                dp_size=self.dp_size)
+        else: 
+            # use alltoall dispatch and combine
+            final_hidden_states = self.quant_method.apply(
+                layer=self,
+                x=hidden_states,
+                router_logits=router_logits,
+                top_k=real_top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                global_num_experts=self.global_num_experts,
+                expert_map=self.expert_map,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                e_score_correction_bias=self.e_score_correction_bias,
+                is_prefill=is_prefill,
+                enable_force_load_balance=enable_force_load_balance,
+                dp_size=self.dp_size)
+
 
         return final_hidden_states
