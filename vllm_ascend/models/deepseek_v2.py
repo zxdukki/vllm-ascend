@@ -760,7 +760,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 hidden_states[i], residual[i] = self._forward_ms_op_attn(
                     positions[i], hidden_states[i], residual[i], kv_cache,
                     attn_metadata[i])
-        ''' block 3 : shared experts
+        ''' block 3 : post norm + shared experts
             if there is an allreduce ops in shared expert, we can overlap it with the computation of the 
             shared expert for next microbatch or moe gating
         '''
@@ -793,64 +793,141 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         if get_ep_group().world_size == 1 or (VLLM_ENABLE_MC2
                                               and not is_prefill):
             ''' block 4: moe comp
+                TODO: optimize the overlap for decode + mc2
             '''
+            for i in range(num_micro_batchs):
+                if attn_metadata is None:
+                    # for profile run
+                    is_prefill = True
+                    enable_force_load_balance = True
+                else:
+                    is_prefill = attn_metadata.num_prefills > 0
+                    enable_force_load_balance = False
+
+                # moe pre comp
+                router_logit, hidden_states[
+                    i], padded_num_token, chunk_hidden_state = self.mlp._forward_ms_op_moe_pre_comp(
+                        hidden_states[i])
+                '''padded_num_tokens.append(padded_num_token)
+                router_logits.append(router_logit)
+                chunk_hidden_states.append(chunk_hidden_state)'''
+
+                hidden_states[i] = self._forward_ms_op_moe_pre_comm(is_prefill, hidden_states[i])
+
+                hidden_states[i] = self._forward_ms_op_moe_post_comp(is_prefill, enable_force_load_balance, hidden_states[i], router_logit)
+
+                context = MultiStreamStepMetadata(
+                    comm_stream=ms_metadata.communicate_stream,
+                    before_comm_event=ms_metadata.ms_events[layer_index][i][
+                        MSEventKey.FFN_COM_FINISH],
+                    after_comm_event=ms_metadata.ms_events[layer_index][i][
+                        MSEventKey.FFN_AR_FINISH],
+                )
+                # moe post communications, which can be overlapped with next attention layer
+                with set_multistream_context(context, i):
+                    hidden_states[i] = self.mlp._forward_ms_op_moe_post_comm(
+                        hidden_states[i], shared_outputs[i],
+                        chunk_hidden_state, padded_num_token,
+                        num_tokens[i], hidden_dims[i])
+
+            return hidden_states, residual
+
 
         else:
             ''' block 4 : moe gate + moe pre comm
                 if we enable alltoall comm for deepseek moe, we attempt to overlap the moe dispatch alltoall
                 with the moe gate
             '''
-        for i in range(num_micro_batchs):
-            #ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_SE_COMM_FINISH)
-            # when profile runs, force experts to load balanced tokens
-            # to avoid high memory consumption on a single rank.
-            # TODO: need a better flag to indicate whether in profile run or not.
-            if attn_metadata[i] is None:
-                # for profile run
-                is_prefill = True
-                enable_force_load_balance = True
-            else:
-                is_prefill = attn_metadata[i].num_prefills > 0
-                enable_force_load_balance = False
+            for i in range(num_micro_batchs):
+                #ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_SE_COMM_FINISH)
+                # when profile runs, force experts to load balanced tokens
+                # to avoid high memory consumption on a single rank.
+                # TODO: need a better flag to indicate whether in profile run or not.
+                if attn_metadata is None:
+                    # for profile run
+                    is_prefill = True
+                    enable_force_load_balance = True
+                else:
+                    is_prefill = attn_metadata.num_prefills > 0
+                    enable_force_load_balance = False
 
-            # moe pre comp
-            router_logit, hidden_states[
-                i], padded_num_token, chunk_hidden_state = self.mlp._forward_ms_op_moe_pre_comp(
-                    hidden_states[i])
-            padded_num_tokens.append(padded_num_token)
-            router_logits.append(router_logit)
-            chunk_hidden_states.append(chunk_hidden_state)
+                # moe pre comp
+                ms_metadata.try_wait_event(layer_index, i, MSEventKey.ATTN_AR_FINISH)
+                router_logit, hidden_states[
+                    i], padded_num_token, chunk_hidden_state = self.mlp._forward_ms_op_moe_pre_comp(
+                        hidden_states[i])
+                padded_num_tokens.append(padded_num_token)
+                router_logits.append(router_logit)
+                chunk_hidden_states.append(chunk_hidden_state)
 
-            if CustomDeepseekV2MoE.top_k:
-                real_top_k = CustomDeepseekV2MoE.top_k
-            else:
-                real_top_k = self.mlp.experts.top_k
 
-            if VLLM_ENABLE_MC2 and not is_prefill:
-                ...
+                context = MultiStreamStepMetadata(
+                    comm_stream=ms_metadata.communicate_stream,
+                    before_comm_event=ms_metadata.ms_events[layer_index][i][
+                        MSEventKey.MOE_GATE_FINISH],
+                    after_comm_event=ms_metadata.ms_events[layer_index][i][
+                        MSEventKey.MOE_BEFORE_COMM],
+                )
+                hidden_states[i] = self._forward_ms_op_moe_pre_comm(is_prefill, hidden_states[i])
 
-            hidden_states[i] = self.mlp.experts._forward_ms_fused_moe(
-                hidden_states[i], router_logits[i], is_prefill, real_top_k,
+
+            for i in range(num_micro_batchs):
+                ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_BEFORE_COMM)
+                hidden_states[i] = self._forward_ms_op_moe_post_comp(is_prefill, enable_force_load_balance, hidden_states[i], router_logit)
+
+                context = MultiStreamStepMetadata(
+                    comm_stream=ms_metadata.communicate_stream,
+                    before_comm_event=ms_metadata.ms_events[layer_index][i][
+                        MSEventKey.FFN_COM_FINISH],
+                    after_comm_event=ms_metadata.ms_events[layer_index][i][
+                        MSEventKey.FFN_AR_FINISH],
+                )
+                # moe post communications, which can be overlapped with next attention layer
+                with set_multistream_context(context, i):
+                    hidden_states[i] = self.mlp._forward_ms_op_moe_post_comm(
+                        hidden_states[i], shared_outputs[i],
+                        chunk_hidden_states[i], padded_num_tokens[i],
+                        num_tokens[i], hidden_dims[i])
+
+        return hidden_states, residual
+
+    # the communication ops before moe gemm while after gating
+    def _forward_ms_op_moe_pre_comm(self, is_prefill, hidden_states):
+        if get_ep_group().world_size == 1 or (VLLM_ENABLE_MC2
+                                              and not is_prefill):
+            # currently no comm before moe
+            return hidden_states
+        else:
+            # moe dispatch
+            ...
+            
+    # the comp ops before moe combine while after moe dispatch
+    def _forward_ms_op_moe_post_comp(self, is_prefill, enable_force_load_balance, hidden_states, router_logits):
+
+        if CustomDeepseekV2MoE.top_k:
+            real_top_k = CustomDeepseekV2MoE.top_k
+        else:
+            real_top_k = self.mlp.experts.top_k
+
+        if VLLM_ENABLE_MC2 and not is_prefill:
+            ...
+
+        if get_ep_group().world_size == 1 or (VLLM_ENABLE_MC2
+                                              and not is_prefill):
+            # moe comp
+            hidden_states = self.mlp.experts._forward_ms_fused_moe(
+                hidden_states, router_logits, is_prefill, real_top_k,
                 enable_force_load_balance)
 
             if VLLM_ENABLE_MC2 and not is_prefill:
                 ...
 
-            context = MultiStreamStepMetadata(
-                comm_stream=ms_metadata.communicate_stream,
-                before_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.FFN_COM_FINISH],
-                after_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.FFN_AR_FINISH],
-            )
-            # moe post communications, which can be overlapped with next attention layer
-            with set_multistream_context(context, i):
-                hidden_states[i] = self.mlp._forward_ms_op_moe_post_comm(
-                    hidden_states[i], shared_outputs[i],
-                    chunk_hidden_states[i], padded_num_tokens[i],
-                    num_tokens[i], hidden_dims[i])
+        else: 
+            # moe comp between alltoall
+            ...
+            
 
-        return hidden_states, residual
+    def _forward_ms_op_moe_post_comm():
 
     # should split ops in Decoder Layer
     def _forward_ms_op_input_layernorm(
