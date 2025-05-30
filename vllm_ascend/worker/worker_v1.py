@@ -31,6 +31,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               set_custom_all_reduce)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.logger import logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -216,12 +217,23 @@ class NPUWorker(WorkerBase):
         else:
             self.profiler.stop()
 
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_runner.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def list_loras(self) -> set[int]:
+        return self.model_runner.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)
+
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
-        additional_config = self.vllm_config.additional_config
         parallel_config = self.vllm_config.parallel_config
         set_custom_all_reduce(
             not self.parallel_config.disable_custom_all_reduce)
@@ -231,13 +243,11 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
-        expert_tensor_parallel_size = 1
-        if additional_config is not None and "expert_tensor_parallel_size" in additional_config:
-            expert_tensor_parallel_size = int(
-                additional_config["expert_tensor_parallel_size"])
-        init_ascend_model_parallel(parallel_config.tensor_parallel_size,
-                                   parallel_config.pipeline_parallel_size,
-                                   expert_tensor_parallel_size)
+        init_ascend_model_parallel(
+            parallel_config.expert_parallel_size,
+            parallel_config.expert_tensor_parallel_size,
+            parallel_config.world_size,
+        )
         ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):

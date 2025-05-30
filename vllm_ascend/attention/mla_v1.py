@@ -18,11 +18,24 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
+
+
+@dataclass
+class CommonAttentionMetadata:
+    """
+    Attention metadata attributes that can be shared by layers in different KV
+    cache groups and thus having different block table.
+    """
+
+    query_start_loc: torch.Tensor
+    """(batch_size + 1,), the start location of each request in query Tensor"""
+    seq_lens: torch.Tensor
+    """(batch_size,), the length of each request including both computed tokens
+    and newly scheduled tokens"""
 
 
 class AscendMLABackend(AttentionBackend):
@@ -59,6 +72,7 @@ class AscendMLAPrefillMetadata:
     seq_lens: list[int]
     context_lens: torch.Tensor
     input_positions: torch.Tensor
+    query_start_loc: torch.Tensor
     block_table: torch.Tensor
     max_query_len: int
     max_seq_lens: int
@@ -92,6 +106,9 @@ class AscendMLAMetadata:
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     slot_mapping: torch.Tensor
+    query_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
+    block_tables: torch.Tensor
 
     # New for MLA (compared to FlashAttention)
     # For handling prefill decode split
@@ -145,7 +162,7 @@ class AscendMLAMetadataBuilder:
 
     # _attn_mask_builder = None
     def __init__(self,
-                 runner: "NPUModelRunner",
+                 runner,
                  metadata_cls: Optional[AscendMLAMetadata] = None):
         self.metadata_cls: Optional[AscendMLAMetadata] = metadata_cls \
             if metadata_cls is not None else AscendMLAMetadata  # type: ignore
@@ -245,6 +262,7 @@ class AscendMLAMetadataBuilder:
               num_reqs: int,
               num_actual_tokens: int,
               max_query_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
               common_prefix_len: Optional[int] = None,
               graph_pad_size: int = -1) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
@@ -253,8 +271,9 @@ class AscendMLAMetadataBuilder:
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
         device = self.runner.device
-        block_table = (
-            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+
+        block_table = (self.runner.input_batch.block_table[0].
+                       get_device_tensor()[:num_reqs])
         slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
             device, non_blocking=True)
         input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
@@ -266,6 +285,7 @@ class AscendMLAMetadataBuilder:
         seq_lens = seq_lens_cpu
         max_query_len = query_lens.max().item()
         max_seq_lens = seq_lens.max().item()
+        query_start_loc = None
 
         prefill_metadata = None
         if self._num_prefills > 0:
@@ -273,6 +293,9 @@ class AscendMLAMetadataBuilder:
             tokens_start = self._num_decode_tokens
             max_query_len = query_lens[tokens_start:].max().item()
             max_seq_lens = seq_lens[tokens_start:].max().item()
+            query_start_loc = common_attn_metadata.query_start_loc
+            prefill_query_start_loc = query_start_loc[
+                reqs_start:] - query_start_loc[reqs_start]
 
             prefill_metadata = AscendMLAPrefillMetadata(
                 attn_mask=self.runner.attn_mask,
@@ -283,6 +306,7 @@ class AscendMLAMetadataBuilder:
                 block_table=block_table[reqs_start:, ...],
                 max_query_len=max_query_len,
                 max_seq_lens=max_seq_lens,
+                query_start_loc=prefill_query_start_loc,
             )
 
         decode_metadata = None
@@ -341,6 +365,9 @@ class AscendMLAMetadataBuilder:
             attn_state=self.runner.attn_state,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            query_start_loc=query_start_loc,
+            block_tables=block_table,
+            seq_lens=seq_lens,
         )
 
 
@@ -390,12 +417,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
-        # TODO: below padding should be removed after kernel is ready
-        # we found npu_flash_attention can only works on 128 divisible head_dim, we pad it to target size here
-        # and slice the final result to guarantee its functionality.
-        self.padding_head_dim = (
-            (self.qk_nope_head_dim + self.qk_rope_head_dim - 1) // 128 +
-            1) * 128
 
         # Hack for V1 for now to avoid torch library overhead (since we are
         # already inside an attention custom op), pull out the forward
@@ -493,9 +514,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         # Convert from (L, N, V) to (N, L, V)
-        self.W_UV = W_UV.transpose(0, 1)
+        self.W_UV = W_UV.transpose(0, 1).contiguous()
         # Convert from (L, N, P) to (N, P, L)
-        self.W_UK_T = W_UK.permute(1, 2, 0)
+        self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
+        self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)
+        self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
 
     def _forward_prefill(
         self,
@@ -535,7 +558,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             attn_output = torch.empty(num_tokens,
                                       self.num_heads,
-                                      self.padding_head_dim,
+                                      self.v_head_dim,
                                       dtype=query.dtype,
                                       device=query.device)
             k_nope, value = self.kv_b_proj(kv_c_normed)[0].view(
@@ -544,31 +567,17 @@ class AscendMLAImpl(MLAAttentionImpl):
                     [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             key = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                             dim=-1)
-            pad_query = torch.nn.functional.pad(query, [
-                0, self.padding_head_dim - self.qk_rope_head_dim -
-                self.qk_nope_head_dim
-            ],
-                                                value=0)
-            pad_key = torch.nn.functional.pad(key, [
-                0, self.padding_head_dim - self.qk_rope_head_dim -
-                self.qk_nope_head_dim
-            ],
-                                              value=0)
-            pad_value = torch.nn.functional.pad(
-                value, [0, self.padding_head_dim - self.v_head_dim], value=0)
             torch_npu._npu_flash_attention(
-                query=pad_query,
-                key=pad_key,
-                value=pad_value,
+                query=query,
+                key=key,
+                value=value,
                 mask=attn_metadata.attn_mask,
                 seq_len=attn_metadata.prefill.context_lens,
                 scale_value=self.scale,
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_heads,
                 out=attn_output)
-            attn_output = attn_output.view(
-                -1, self.num_heads,
-                self.padding_head_dim)[:, :, :self.v_head_dim]
+            attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         else:
             raise RuntimeError(
                 "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache and ChunkedPrefill scenario in forward prefill, please file a bug to vllm-ascend !"
