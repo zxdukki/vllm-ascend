@@ -16,7 +16,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -402,7 +401,6 @@ class AscendMLAMetadataBuilder:
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
             query_lens=query_lens.tolist(),
-            seq_lens=seq_lens,
             slot_mapping=slot_mapping,
             head_dim=self.runner.model_config.get_head_size(),
             num_decodes=self._num_decodes,

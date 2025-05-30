@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Any, List, Optional
 
 import numpy as np
@@ -95,6 +96,14 @@ def model_input_split_v1_mla_attn(
     seq_lens = attn_metadata.prefill.seq_lens if attn_metadata.num_prefills > 0 else attn_metadata.decode.seq_lens
     [seq_lens_pre, seq_lens_post] = split_attn_tensor_type(seq_lens, seq_index)
 
+    query_start_loc_pre = attn_metadata.query_start_loc[:seq_index + 1]
+    query_start_loc_post = deepcopy(
+        attn_metadata.query_start_loc[seq_index:]
+    ) - attn_metadata.query_start_loc[seq_index]
+    [block_table_pre,
+     block_table_post] = split_attn_tensor_type(attn_metadata.block_tables,
+                                                seq_index)
+
     if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache or attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
         # the attn_mla kernel in torch npu only accept 128*128 attn mask
         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
@@ -131,6 +140,18 @@ def model_input_split_v1_mla_attn(
         [prefill_query_lens_pre, prefill_query_lens_post
          ] = split_attn_tensor_type(attn_metadata.prefill.query_lens,
                                     seq_index - attn_metadata.num_decodes)
+        prefill_query_start_loc_pre = attn_metadata.prefill.query_start_loc[:
+                                                                            seq_index
+                                                                            +
+                                                                            1 -
+                                                                            attn_metadata
+                                                                            .
+                                                                            num_decodes]
+        prefill_query_start_loc_post = deepcopy(
+            attn_metadata.prefill.query_start_loc[seq_index -
+                                                  attn_metadata.num_decodes:]
+        ) - attn_metadata.prefill.query_start_loc[seq_index -
+                                                  attn_metadata.num_decodes]
         context_len_pre = seq_lens_pre[attn_metadata.num_decodes:]
         context_len_post = seq_lens_post
         prefill_max_query_len_pre = max(prefill_query_lens_pre)
@@ -139,6 +160,7 @@ def model_input_split_v1_mla_attn(
             attn_mask=attn_mask_pre,
             query_lens=prefill_query_lens_pre,
             seq_lens=seq_lens_pre,
+            query_start_loc=prefill_query_start_loc_pre,
             input_positions=input_positions_pre,
             context_lens=context_len_pre,
             block_table=block_tables_pre,
@@ -149,6 +171,7 @@ def model_input_split_v1_mla_attn(
             attn_mask=attn_mask_post,
             query_lens=prefill_query_lens_post,
             seq_lens=seq_lens_post,
+            query_start_loc=prefill_query_start_loc_post,
             input_positions=input_positions_post,
             context_lens=context_len_post,
             block_table=block_tables_post,
@@ -190,6 +213,9 @@ def model_input_split_v1_mla_attn(
         num_input_tokens=token_index,
         head_dim=attn_metadata.head_dim,
         slot_mapping=slot_mapping_pre,
+        seq_lens=seq_lens_pre,
+        query_start_loc=query_start_loc_pre,
+        block_tables=block_table_pre,
         num_decodes=num_decodes_pre,
         num_prefills=num_prefills_pre,
         num_decode_tokens=num_decode_tokens_pre,
@@ -203,6 +229,9 @@ def model_input_split_v1_mla_attn(
         num_input_tokens=attn_metadata.num_input_tokens - token_index,
         head_dim=attn_metadata.head_dim,
         slot_mapping=slot_mapping_post,
+        seq_lens=seq_lens_post,
+        query_start_loc=query_start_loc_post,
+        block_tables=block_table_post,
         num_decodes=num_decodes_post,
         num_prefills=num_prefills_post,
         num_decode_tokens=num_decode_tokens_post,

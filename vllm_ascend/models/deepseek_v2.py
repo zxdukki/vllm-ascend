@@ -78,6 +78,7 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import dispose_tensor
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 VLLM_ENABLE_DBO: bool = envs_ascend.VLLM_ENABLE_DBO
@@ -1063,9 +1064,11 @@ class CustomDeepseekV2Model(nn.Module):
         return hidden_states
 
     def can_run_ms(self):
-        # currently we only enable prefill overlap
         attn_metadata = get_forward_context().attn_metadata
-        # profile run
+        # support mla attention and V1 engine at present
+        if not self.use_mla or not envs.VLLM_USE_V1:
+            return False
+        # enable prefill overlap
         if attn_metadata is None or attn_metadata.num_prefills == 0:
             return False
         else:
@@ -1078,9 +1081,6 @@ class CustomDeepseekV2Model(nn.Module):
                 return False
 
         if self.multistream_config is None:
-            return False
-        # support mla attention and V1 engine at present
-        if not self.use_mla or not envs.VLLM_USE_V1:
             return False
         # check whether the total tokens exceed the threshold
         if attn_metadata.num_actual_tokens < self.multistream_config.min_total_tokens_to_split:
