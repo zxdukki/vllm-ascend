@@ -3,8 +3,6 @@ from vllm.logger import init_logger
 from .context import (get_multistream_layer_context,
                       get_multistream_microbatch_context)
 
-# TODO: move this part to vllm
-
 logger = init_logger(__name__)
 
 

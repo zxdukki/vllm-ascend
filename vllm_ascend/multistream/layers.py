@@ -10,7 +10,6 @@ from .context import (get_multistream_layer_context,
 from .metadata import MultiStreamMetadata
 
 
-# TODO: move this part to vllm
 class MultiStreamPreTransformerLayer(torch.nn.Module):
 
     def __init__(self, multistream_metadata: MultiStreamMetadata):

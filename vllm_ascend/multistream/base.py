@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from enum import Enum
 
 
-# TODO: move this part to vllm
 class MSEventKey(Enum):
     ATTN_COM_FINISH = 0
     ATTN_AR_FINISH = 1

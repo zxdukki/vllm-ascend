@@ -732,13 +732,12 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         shared_outputs = []
         router_logits = []
         chunk_hidden_states = []
-        ''' block 1 : attention
-            block 2 : attn tp communication, currently we switch to the comm stream 
-            in tensor_model_parallel_all_reduce;
-            the attn computation of microbatch 1 can be overlapped with the moe 
-            communication in the previous layer, and the attn computation of microbatch
-            2 can be overlapped with the attn communication of microbatch 1
-        '''
+
+        # block 1 : attention
+        # block 2 : attn tp communication
+        # the attn computation of microbatch 1 can be overlapped with the moe
+        # communication in the previous layer, and the attn computation of microbatch 2
+        # can be overlapped with the attn communication of microbatch 1
         for i in range(num_micro_batchs):
             # wait last layer moe finishing communication
             ms_metadata.try_wait_event(layer_index - 1, i,
@@ -765,10 +764,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 hidden_states[i], residual[i] = self._forward_ms_op_attn(
                     positions[i], hidden_states[i], residual[i], kv_cache,
                     attn_metadata[i])
-        ''' block 3 : shared experts
-            if there is an allreduce ops in shared expert, we can overlap it with the computation of the 
-            shared expert for next microbatch or moe gating
-        '''
+
+        # block 3 : shared experts
+        # if there is an allreduce ops in shared expert, we can overlap it with the computation of the
+        # shared expert for next microbatch or moe gating
         for i in range(num_micro_batchs):
             ms_metadata.try_wait_event(layer_index, i,
                                        MSEventKey.ATTN_AR_FINISH)
@@ -797,7 +796,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
         # block 4 : moe
         for i in range(num_micro_batchs):
-            #ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_SE_COMM_FINISH)
             # when profile runs, force experts to load balanced tokens
             # to avoid high memory consumption on a single rank.
             # TODO: need a better flag to indicate whether in profile run or not.
@@ -810,13 +808,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 enable_force_load_balance = False
 
             if self.mlp.tp_size > 1:
-                #if num_tokens[i] < self.mlp.tp_size:
-                #    target_size = self.mlp.tp_size
-                #    new_hidden_states = torch.empty([target_size, hidden_dims[i]],
-                #                                    dtype=hidden_states[i].dtype,
-                #                                    device=hidden_states[i].device)
-                #    new_hidden_states[:num_tokens[i]] = hidden_states[i]
-                #    hidden_states[i] = new_hidden_states
                 num_token, _ = hidden_states[i].shape
                 padded_num_tokens = (self.mlp.tp_size - num_token %
                                      self.mlp.tp_size) % self.mlp.tp_size
@@ -839,18 +830,12 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             else:
                 real_top_k = self.mlp.experts.top_k
 
-            if VLLM_ENABLE_MC2 and not is_prefill:
-                ...
-
             hidden_states[i] = self.mlp.experts._forward_ms_fused_moe_comp(
                 local_hidden_states, router_logits[i], is_prefill, real_top_k,
                 enable_force_load_balance)
 
-            if VLLM_ENABLE_MC2 and not is_prefill:
-                ...
-            ''' the following kernels will be submitted to the comm stream to overlap the computation of the 
-                moe computation of next microbatch and the attn computation of next layer
-            '''
+            # the following kernels will be submitted to the comm stream to overlap the computation of the
+            # moe computation of next microbatch and the attn computation of next layer
             context = MultiStreamStepMetadata(
                 comm_stream=ms_metadata.communicate_stream,
                 before_comm_event=ms_metadata.ms_events[layer_index][i][
@@ -860,7 +845,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             )
             context.before_comm_event.record()
             with torch.npu.stream(ms_metadata.communicate_stream):
-                #with set_multistream_context(context, i):
                 context.before_comm_event.wait()
                 if self.mlp.experts.reduce_results and (
                         self.mlp.experts.tp_size > 1
@@ -868,7 +852,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                     hidden_states[i] = tensor_model_parallel_all_reduce(
                         hidden_states[i])
                 context.after_comm_event.record()
-            # check here
+
             hidden_states[
                 i] = hidden_states[i] * self.mlp.routed_scaling_factor
             context = MultiStreamStepMetadata(
@@ -993,21 +977,19 @@ class CustomDeepseekV2Model(nn.Module):
                 ["hidden_states", "residual"], config.hidden_size))
 
         # tbo related members
-        self.multistream_config: Optional[MultiStreamConfig] = None
         if VLLM_ENABLE_DBO:
+            self.use_mla = model_config.use_mla
             self.multistream_config = MultiStreamConfig()
-
-        self.use_mla = model_config.use_mla
-        self.multistream_metadata = make_multistream_metadata_ds(
-            start_layer=self.start_layer + self.first_k_dense_replace,
-            end_layer=self.end_layer,
-            causal_lm=getattr(config, "causal_lm", True),
-            multistream_config=self.multistream_config,
-        )
-        self.ms_pre_layer = MultiStreamPreTransformerLayer(
-            self.multistream_metadata)
-        self.ms_post_layer = MultiStreamPostTransformerLayer(
-            self.multistream_metadata)
+            multistream_metadata = make_multistream_metadata_ds(
+                start_layer=self.start_layer + self.first_k_dense_replace,
+                end_layer=self.end_layer,
+                causal_lm=getattr(config, "causal_lm", True),
+                multistream_config=self.multistream_config,
+            )
+            self.ms_pre_layer = MultiStreamPreTransformerLayer(
+                multistream_metadata)
+            self.ms_post_layer = MultiStreamPostTransformerLayer(
+                multistream_metadata)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1032,11 +1014,10 @@ class CustomDeepseekV2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        num_normal_layers = (self.first_k_dense_replace
-                             if self.multistream_config is not None
+        num_normal_layers = (self.first_k_dense_replace if VLLM_ENABLE_DBO
                              and self.can_run_ms() else self.end_layer -
                              self.start_layer)
-        # if we enable multistream/dbo, only process dense layers here
+
         for i in range(self.start_layer, self.start_layer + num_normal_layers):
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -1046,13 +1027,15 @@ class CustomDeepseekV2Model(nn.Module):
                 attn_metadata)
 
         moe_start_layer = self.start_layer + num_normal_layers
-        hidden_states, residual = self._forward_ms_layers(
-            positions=positions,
-            hidden_states=hidden_states,
-            residual=residual,
-            moe_start_layer=moe_start_layer,
-            kv_caches=kv_caches,
-        )
+        if moe_start_layer != self.end_layer:
+            # if we enable multistream/dbo, process sparse layers here
+            hidden_states, residual = self._forward_ms_layers(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
+                moe_start_layer=moe_start_layer,
+                kv_caches=kv_caches,
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -1079,11 +1062,8 @@ class CustomDeepseekV2Model(nn.Module):
             if token_index == 0 or seq_index == 0 or seq_index == len(
                     attn_metadata.query_lens):
                 return False
-
-        if self.multistream_config is None:
-            return False
         # check whether the total tokens exceed the threshold
-        if attn_metadata.num_actual_tokens < self.multistream_config.min_total_tokens_to_split:
+        if self.multistream_config is None or attn_metadata.num_actual_tokens < self.multistream_config.min_total_tokens_to_split:
             return False
         return True
 

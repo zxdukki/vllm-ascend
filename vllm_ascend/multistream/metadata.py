@@ -2,8 +2,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.sequence import IntermediateTensors
+
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 
 from .base import MSAttentionMetadataSplitConfig, MSEventKey
 
@@ -111,19 +112,19 @@ class MultiStreamMetadata:
 
     def split_micro_batch(
         self,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: "AscendMLAMetadata",
         intput_tensors: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         intermediate_tensors_keys: Optional[List[str]] = None,
-    ) -> Tuple[bool, Union[AttentionMetadata, List[AttentionMetadata]], Union[
+    ) -> Tuple[bool, Union[AscendMLAMetadata, List[AscendMLAMetadata]], Union[
             List[torch.Tensor], List[List[torch.Tensor]]], Union[
                 IntermediateTensors, List[IntermediateTensors]]]:
-        attn_metadata = attn_metadata.split_metadata_for_multistream(
+        attn_metadata_list = attn_metadata.split_metadata_for_multistream(
             self.ms_split_config)
-        if len(attn_metadata) == 1:
-            return False, attn_metadata[
+        if len(attn_metadata_list) == 1:
+            return False, attn_metadata_list[
                 0], intput_tensors, intermediate_tensors
-        split_index = attn_metadata[0].slot_mapping.shape[0]
+        split_index = attn_metadata_list[0].slot_mapping.shape[0]
         input_tensors = split_micro_batches_tensors(intput_tensors,
                                                     split_index)
         if intermediate_tensors is not None:
@@ -134,7 +135,7 @@ class MultiStreamMetadata:
                 IntermediateTensors(inter_tensors)
                 for inter_tensors in inter_tensors_list
             ]
-        return True, attn_metadata, input_tensors, intermediate_tensors
+        return True, attn_metadata_list, input_tensors, intermediate_tensors
 
     def merge_micro_batches(
         self, input_tensors: Union[List[torch.Tensor],

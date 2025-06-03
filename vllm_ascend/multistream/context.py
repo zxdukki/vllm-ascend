@@ -1,8 +1,6 @@
 from contextlib import contextmanager
 from typing import Any
 
-# TODO: move this part to vllm
-
 _ms_comm_context: Any = None
 _cur_micro_batch_num: int = -1
 _ms_layer_index_context: int = -1
