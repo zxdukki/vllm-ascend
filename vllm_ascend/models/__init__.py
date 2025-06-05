@@ -2,6 +2,7 @@ from vllm import ModelRegistry
 
 
 def register_model():
+    from .deepseek_dbo import CustomDeepseekDBOForCausalLM  # noqa: F401
     from .deepseek_mtp import CustomDeepSeekMTP  # noqa: F401
     from .deepseek_v2 import CustomDeepseekV2ForCausalLM  # noqa: F401
     from .deepseek_v2 import CustomDeepseekV3ForCausalLM  # noqa: F401
@@ -33,3 +34,7 @@ def register_model():
     ModelRegistry.register_model(
         "Qwen3MoeForCausalLM",
         "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+
+    ModelRegistry.register_model(
+        "DeepseekDBOForCausalLM",
+        "vllm_ascend.models.deepseek_dbo:CustomDeepseekDBOForCausalLM")

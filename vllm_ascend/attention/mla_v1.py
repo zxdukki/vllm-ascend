@@ -14,6 +14,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
+from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 
@@ -119,7 +120,7 @@ class AscendMLAMetadata:
 
     with_prefill_across_dp: bool = False
 
-    query_lens: list[int] = None
+    query_lens: Optional[list[int]] = None
     # The dimension of the attention heads
     head_dim: Optional[int] = None
     attn_mask: torch.Tensor = None
@@ -412,6 +413,7 @@ class AscendMLAMetadataBuilder:
             decode=decode_metadata,
             query_start_loc=query_start_loc,
             block_tables=block_table,
+            seq_lens=seq_lens,
             with_prefill_across_dp=with_prefill_across_dp,
         )
 
@@ -600,9 +602,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
 
-        # A better way is to modify the communication ops or RowParallel Layer in vllm;
-        from vllm_ascend.multistream.context import \
-            get_multistream_comm_context
         current_ms_metadata = get_multistream_comm_context()
         if current_ms_metadata is None:
             return self.o_proj(attn_output)[0]
@@ -710,8 +709,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                 context_lens=attn_metadata.decode.seq_lens,  # type:ignore
                 mla_vheadsize=self.kv_lora_rank,
                 out=attn_output)
-        from vllm_ascend.multistream.context import \
-            get_multistream_comm_context
         current_ms_metadata = get_multistream_comm_context()
         if current_ms_metadata is None:
             return self._v_up_proj_and_o_proj(attn_output)
@@ -848,8 +845,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
             # TODO: use an elegant way to overlap
-            from vllm_ascend.multistream.context import \
-                get_multistream_comm_context
             output_prefill = self._forward_prefill(prefill_q,
                                                    prefill_k_c_normed,
                                                    prefill_k_pe, kv_cache,
@@ -868,14 +863,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                                             decode_k_nope, decode_k_pe,
                                             kv_cache, attn_metadata)
             else:
-                from vllm_ascend.multistream.context import \
-                    get_multistream_comm_context
                 output_decode = self._forward_decode(decode_ql_nope,
                                                      decode_q_pe,
                                                      decode_k_nope,
                                                      decode_k_pe, kv_cache,
                                                      attn_metadata)
-                current_ms_metadata = get_multistream_comm_context()
+            current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
                     output[:num_decode_tokens] = output_decode

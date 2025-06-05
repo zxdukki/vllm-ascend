@@ -23,7 +23,7 @@ def reset_multistream_layer_context():
     """
     reset multistream layer context
     """
-    global _ms_layer_index_context, _ms_metadata_context
+    global _ms_layer_index_context, _ms_metadata_context, _ms_attn_metadata_context
     _ms_layer_index_context = -1
     _ms_metadata_context = None
     _ms_attn_metadata_context = None
