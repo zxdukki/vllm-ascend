@@ -85,11 +85,9 @@ def test_models_distributed_topk() -> None:
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
 def test_models_distributed_DeepSeek_dbo():
-    example_prompts = [
-        "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
-    ] * 10
+    example_prompts = ["The president of the United States is"] * 41
     dtype = "half"
-    max_tokens = 5
+    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
     with VllmRunner(
             "deepseek-ai/DeepSeek-V2-Lite",
             dtype=dtype,
@@ -99,4 +97,4 @@ def test_models_distributed_DeepSeek_dbo():
                 "architectures": ["DeepseekDBOForCausalLM"],
             }  # override the model arch to the dbo version
     ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+        vllm_model.generate(example_prompts, sampling_params)

@@ -8,31 +8,31 @@ os.environ["VLLM_ASCEND_ENABLE_DBO"] = "1"
 os.environ["VLLM_USE_V1"] = "1"
 
 # Sample prompts.
-prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-] * 10
+prompts = ["The president of the United States is"] * 41
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
 
 def main():
     # Create an LLM.
     llm = LLM(
-        model="deepseek-ai/DeepSeek-V2-Lite",
+        model="deepseek-ai/DeepSeek-V3-Lite-base-latest-w8a8-dynamic",
         hf_overrides={
             "architectures": ["DeepseekDBOForCausalLM"],
         },  # override the model arch to run the dbo model
         enforce_eager=True,
-        tensor_parallel_size=8,
-        max_num_seqs=16,
-        max_model_len=8192,
-        max_num_batched_tokens=32768,
-        block_size=128,
-        compilation_config=1,
-        gpu_memory_utilization=0.96)
+        tensor_parallel_size=2,
+        max_model_len=4096,
+        trust_remote_code=True,
+        additional_config={
+            "torchair_graph_config": {
+                "enabled": False
+            },
+            "ascend_scheduler_config": {
+                "enabled": True
+            },
+            "expert_tensor_parallel_size": 1
+        })
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
