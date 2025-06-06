@@ -93,8 +93,5 @@ def test_models_distributed_DeepSeek_dbo():
             dtype=dtype,
             tensor_parallel_size=4,
             distributed_executor_backend="mp",
-            hf_overrides={
-                "architectures": ["DeepseekDBOForCausalLM"],
-            }  # override the model arch to the dbo version
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)

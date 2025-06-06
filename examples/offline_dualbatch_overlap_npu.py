@@ -15,24 +15,20 @@ sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
 def main():
     # Create an LLM.
-    llm = LLM(
-        model="deepseek-ai/DeepSeek-V3-Lite-base-latest-w8a8-dynamic",
-        hf_overrides={
-            "architectures": ["DeepseekDBOForCausalLM"],
-        },  # override the model arch to run the dbo model
-        enforce_eager=True,
-        tensor_parallel_size=2,
-        max_model_len=4096,
-        trust_remote_code=True,
-        additional_config={
-            "torchair_graph_config": {
-                "enabled": False
-            },
-            "ascend_scheduler_config": {
-                "enabled": True
-            },
-            "expert_tensor_parallel_size": 1
-        })
+    llm = LLM(model="deepseek-ai/DeepSeek-V3-Lite-base-latest-w8a8-dynamic",
+              enforce_eager=True,
+              tensor_parallel_size=2,
+              max_model_len=4096,
+              trust_remote_code=True,
+              additional_config={
+                  "torchair_graph_config": {
+                      "enabled": False
+                  },
+                  "ascend_scheduler_config": {
+                      "enabled": True
+                  },
+                  "expert_tensor_parallel_size": 1
+              })
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
