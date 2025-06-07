@@ -68,9 +68,7 @@ from vllm.sequence import IntermediateTensors
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.multistream.base import MSEventKey
-from vllm_ascend.multistream.context import (
-    advance_step_multistream_layer_context, get_multistream_comm_context,
-    get_multistream_layer_context, set_multistream_context)
+from vllm_ascend.multistream.context import MultiStreamContext, set_multistream_context, get_multistream_comm_context
 from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
                                             MultiStreamPreTransformerLayer)
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
@@ -689,12 +687,13 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
         self,
         positions: List[torch.Tensor],
         hidden_states: List[torch.Tensor],
+        layer_index: int,
+        ms_metadata: Any,
         residual: List[torch.Tensor],
         attn_metadata: List[AttentionMetadata],
         kv_cache: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
     ) -> tuple[List[torch.Tensor], List[torch.Tensor]]:
-        layer_index, ms_metadata, _ = get_multistream_layer_context()
         assert layer_index >= 0 and ms_metadata is not None
         num_micro_batchs = ms_metadata.ms_config.num_micro_batches
         assert isinstance(self.mlp, CustomDeepseekDBOMoE)
@@ -954,6 +953,7 @@ class CustomDeepseekDBOModel(nn.Module):
         if VLLM_ASCEND_ENABLE_DBO:
             self.use_mla = model_config.use_mla
             self.multistream_config = MultiStreamConfig()
+            self.multistream_ctx = MultiStreamContext()
             multistream_metadata = make_multistream_metadata_ds(
                 start_layer=self.start_layer + self.first_k_dense_replace,
                 end_layer=self.end_layer,
@@ -961,9 +961,9 @@ class CustomDeepseekDBOModel(nn.Module):
                 multistream_config=self.multistream_config,
             )
             self.ms_pre_layer = MultiStreamPreTransformerLayer(
-                multistream_metadata)
+                multistream_metadata, self.multistream_ctx)
             self.ms_post_layer = MultiStreamPostTransformerLayer(
-                multistream_metadata)
+                multistream_metadata, self.multistream_ctx)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1051,24 +1051,25 @@ class CustomDeepseekDBOModel(nn.Module):
         is_prefill: bool = False,
     ):
 
-        if moe_start_layer == self.end_layer:
-            return hidden_states, residual
-
         attn_metadata, [positions, hidden_states,
                         residual] = self.ms_pre_layer(
                             [positions, hidden_states, residual], )
         # the rest layers
         for i in range(moe_start_layer, self.end_layer):
+            layer_index, ms_metadata, _ = self.multistream_ctx.get_multistream_layer_context(
+            )
             layer = self.layers[i]
             hidden_states, residual = layer._forward_ms_layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+                layer_index=layer_index,
+                ms_metadata=ms_metadata,
                 attn_metadata=attn_metadata,
                 kv_cache=kv_caches[i - self.start_layer]
                 if kv_caches is not None else None,
                 is_prefill=is_prefill)
-            advance_step_multistream_layer_context()
+            self.multistream_ctx.advance_step_multistream_layer_context()
 
         [hidden_states,
          residual] = self.ms_post_layer([hidden_states, residual], )
