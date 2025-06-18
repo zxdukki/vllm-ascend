@@ -641,7 +641,7 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
 
             if self.mlp.tp_size > 1:
                 num_token, _ = hidden_states[i].shape
-                padded_num_tokens = (self.mlp.tp_size - num_token %
+                padded_num_tokens = (self.mlp.tp_size - num_tokens[i] %
                                      self.mlp.tp_size) % self.mlp.tp_size
                 if padded_num_tokens > 0:
                     hidden_states[i] = nn.functional.pad(
