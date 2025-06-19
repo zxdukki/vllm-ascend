@@ -110,7 +110,7 @@ def test_models_distributed_DeepSeekV3_dbo():
     dtype = "half"
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
     with VllmRunner(
-            "deepseek-ai/DeepSeek-V3-Lite-base-latest-w8a8-dynamic",
+            "vllm-ascend/DeepSeek-V3-Pruning",
             dtype=dtype,
             tensor_parallel_size=4,
             distributed_executor_backend="mp",
