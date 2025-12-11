@@ -972,7 +972,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         flags_tensor = torch.tensor(
             [int(with_prefill), int(enable_dbo)],
             dtype=torch.int32,
-            device="npu")
+            device="cpu")
 
         packed_tensor = torch.cat([num_tokens_tensor, flags_tensor])
         # use cpu_group to avoid cpu synchronization issue.
@@ -3194,7 +3194,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         (num_tokens, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._sync_metadata_across_dp(num_tokens, with_prefill,
                                                      False)
-        moe_comm_type = self._select_moe_comm_method(num_tokens, with_prefill)
+        moe_comm_type = self._select_moe_comm_method(num_tokens)
 
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using
