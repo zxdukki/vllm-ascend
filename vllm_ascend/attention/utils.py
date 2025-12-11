@@ -343,7 +343,6 @@ def _make_metadata_with_slice(
         query_start_loc[1:] -= tokens_skipped
         query_start_loc_cpu[1:] -= tokens_skipped
 
-    # TODO: (zxdu) check whether we need to update it when split in the middle
     seq_lens = attn_metadata.seq_lens[request_slice]
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
 
@@ -359,7 +358,6 @@ def _make_metadata_with_slice(
         seq_lens[-1] -= tokens_skipped
         seq_lens_cpu[-1] -= tokens_skipped
 
-    max_seq_len = int(seq_lens_cpu.max())
     num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
         request_slice]
 
@@ -384,18 +382,6 @@ def _make_metadata_with_slice(
     #if attn_metadata.attn_state != AscendAttentionState.ChunkedPrefill:
     attn_mask = attn_metadata.attn_mask
 
-    cos_sin_slice = slice(
-        request_slice.start * attn_metadata.decode_token_per_req,
-        request_slice.stop * attn_metadata.decode_token_per_req)
-    if attn_metadata.cos is not None:
-        cos = attn_metadata.cos[cos_sin_slice]
-    else:
-        cos = attn_metadata.cos
-
-    if attn_metadata.sin is not None:
-        sin = attn_metadata.sin[cos_sin_slice]
-    else:
-        sin = attn_metadata.sin
     if len(attn_metadata.actual_seq_lengths_q) > 0:
         actual_seq_lengths_q = list(
             range(attn_metadata.decode_token_per_req, max_num_tokens + 1,
@@ -414,7 +400,6 @@ def _make_metadata_with_slice(
         actual_seq_lengths_q=actual_seq_lengths_q,
         num_computed_tokens_cpu=num_computed_tokens_cpu,
         max_query_len=max_query_len,
-        #max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         positions=positions,
@@ -424,8 +409,6 @@ def _make_metadata_with_slice(
         is_only_prefill=attn_metadata.is_only_prefill,
         graph_pad_size=attn_metadata.graph_pad_size,
         decode_token_per_req=attn_metadata.decode_token_per_req,
-        cos=cos,
-        sin=sin,
     )
 
 
