@@ -122,9 +122,12 @@ def set_ascend_forward_context(
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
+        # set this for record cos/sin cache when enabling dbo
         forward_context.cos = None
         forward_context.sin = None
         forward_context.dbo_enabled = False
+        # set this for sync dbo in the first layer after embedding
+        forward_context.dbo_first_layer_sync = True
 
         # set layer_idx to enable optimization features that depend on this information.
         # This is only applicable to models that contain these necessary attributes.
@@ -208,37 +211,45 @@ def create_ascend_forward_context(
     new_forward_context.sp_enabled = cur_forward_context.sp_enabled
     new_forward_context.num_tokens = attn_metadata_i.num_actual_tokens
     tp_world_size = get_tensor_model_parallel_world_size()
-    if get_dp_group(
-    ).world_size > 1 and new_forward_context.dp_metadata is not None:
-        new_forward_context.max_tokens_across_dp = new_forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
+    dp_world_size = get_dp_group().world_size
+
+    new_forward_context.flashcomm_v2_enabled = cur_forward_context.flashcomm_v2_enabled
+    if (new_forward_context.sp_enabled
+            or new_forward_context.flashcomm_v2_enabled):
+        pad_size = (
+            tp_world_size -
+            (new_forward_context.num_tokens % tp_world_size)) % tp_world_size
+        new_forward_context.pad_size = pad_size
+
+    if dp_world_size > 1 and new_forward_context.dp_metadata is not None:
+        max_tokens_across_dp = new_forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
         )
-        if new_forward_context.sp_enabled:
+        if (new_forward_context.sp_enabled
+                or new_forward_context.flashcomm_v2_enabled):
             new_forward_context.padded_length = (
-                new_forward_context.max_tokens_across_dp + tp_world_size -
+                max_tokens_across_dp + tp_world_size -
                 1) // tp_world_size * tp_world_size
             new_forward_context.pad_size = new_forward_context.padded_length - new_forward_context.num_tokens
     else:
-        new_forward_context.max_tokens_across_dp = attn_metadata_i.num_actual_tokens
-        if new_forward_context.sp_enabled:
-            pad_size = (tp_world_size - (new_forward_context.num_tokens %
-                                         tp_world_size)) % tp_world_size
-            new_forward_context.pad_size = pad_size
+        max_tokens_across_dp = new_forward_context.num_tokens
+    new_forward_context.max_tokens_across_dp = max_tokens_across_dp
 
     new_forward_context.moe_comm_type = cur_forward_context.moe_comm_type
     from vllm_ascend.ops.fused_moe.moe_comm_method import \
         get_moe_comm_method
+    # set for different microbatches
     new_forward_context.moe_comm_method = get_moe_comm_method(
         new_forward_context.moe_comm_type, ubatch_num)
     new_forward_context.with_prefill = cur_forward_context.with_prefill
-    new_forward_context.fused_moe_state = cur_forward_context.fused_moe_state
     new_forward_context.in_profile_run = cur_forward_context.in_profile_run
     new_forward_context.capturing = cur_forward_context.capturing
     new_forward_context.mmrs_fusion = cur_forward_context.mmrs_fusion
-    # TODO: Check it
+
     new_forward_context.is_first_layer = cur_forward_context.is_first_layer
     new_forward_context.layer_idx = cur_forward_context.layer_idx
     new_forward_context.model_instance = cur_forward_context.model_instance
     new_forward_context.prefetch_mlp_enabled = cur_forward_context.prefetch_mlp_enabled
+    new_forward_context.is_mtp_model = cur_forward_context.is_mtp_model
 
     if new_forward_context.num_tokens:
         new_forward_context.padded_num_tokens = math.ceil(
@@ -257,6 +268,7 @@ def create_ascend_forward_context(
             new_forward_context.mc2_mask = mc2_mask
 
     new_forward_context.dbo_enabled = True
+    new_forward_context.dbo_first_layer_sync = True
     new_forward_context.cos = None
     new_forward_context.sin = None
     return new_forward_context

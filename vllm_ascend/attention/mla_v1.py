@@ -1563,13 +1563,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                 0]  # type: ignore[misc]
 
         # Process for Flash Comm V1
-        if get_forward_context().is_first_layer:
+        if get_forward_context().dbo_first_layer_sync:
             dbo_record_current_stream(event=UBatchEventKey.ATTN_PRE)
-            get_forward_context().is_first_layer = False
+            get_forward_context().dbo_first_layer_sync = False
 
-        q_c = tensor_model_parallel_all_gather(q_c, 0)
+        q_c = tensor_model_parallel_all_gather(q_c.contiguous(), 0)
 
-        kv_no_split = tensor_model_parallel_all_gather(kv_no_split, 0)
+        kv_no_split = tensor_model_parallel_all_gather(
+            kv_no_split.contiguous(), 0)
 
         dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_PRE)
         q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c,

@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from typing import Optional, Any
+from typing import Optional
 from enum import Enum
-from contextlib import contextmanager
 
 import torch
 
 from vllm import forward_context
 from vllm.forward_context import ForwardContext
 from vllm.v1.worker.ubatching import UBatchContext
+from vllm_ascend import envs
 from vllm_ascend.utils import dbo_current_stream, dbo_set_stream
 
 _THREAD_ID_TO_CONTEXT: dict = {}
@@ -52,6 +52,15 @@ class AscendUBatchContext(UBatchContext):
         self.gpu_compute_done_event = gpu_compute_done_event
         self.schedule = schedule
         self.recv_hook = None
+        # set aic/aiv core num according to the env param
+        self.comm_cube_core = envs.VLLM_ASCEND_DBO_COMM_AIC_NUM
+        self.comm_vector_core = envs.VLLM_ASCEND_DBO_COMM_AIV_NUM
+        # get the total core num
+        props = torch.npu.get_device_limit(torch.npu.current_device())
+        self.comp_cube_core = props[
+            "cube_core_num"] - self.comm_cube_core if self.comm_cube_core != -1 else -1
+        self.comp_vector_core = props[
+            "vector_core_num"] - self.comm_vector_core if self.comm_vector_core != -1 else -1
 
     def __enter__(self):
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
@@ -126,6 +135,11 @@ class AscendUBatchContext(UBatchContext):
         self._wait_comm_done(event)
 
     def record_current_stream(self, event=UBatchEventKey.DEFAULT):
+        # set core limit for communication block
+        if self.comm_cube_core != -1 or self.comm_vector_core != -1:
+            torch.npu.set_stream_limit(dbo_current_stream(),
+                                       cube_num=self.comm_cube_core,
+                                       vector_num=self.comm_vector_core)
         self._signal_compute_done(event)
 
     def wait_current_stream_and_yield(self,
@@ -134,6 +148,11 @@ class AscendUBatchContext(UBatchContext):
         if wait:
             self._wait_compute_done(event)
         self._cpu_yield()
+        # set core limit for comp part
+        if self.comm_cube_core != -1 or self.comm_vector_core != -1:
+            torch.npu.set_stream_limit(dbo_current_stream(),
+                                       cube_num=self.comp_cube_core,
+                                       vector_num=self.comp_vector_core)
 
     def maybe_run_recv_hook(self):
         if self.recv_hook is not None:
@@ -141,6 +160,7 @@ class AscendUBatchContext(UBatchContext):
             self.recv_hook = None
 
     def yield_(self):
+        self.current_stream = dbo_current_stream()
         self._cpu_yield()
 
     # switch func for two stream overlap
@@ -215,6 +235,15 @@ def dbo_register_recv_hook(recv_hook):
         next_ctx.recv_hook = recv_hook
 
 
+def dbo_get_previous_event(func, *args, **kwargs):
+    if len(_THREAD_ID_TO_CONTEXT) > 0:
+        ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
+        ctx = _CURRENT_CONTEXTS[ctx_idx]
+        # execute callable on the ubatch compute stream to record/wait events there
+        with torch.npu.stream(ctx.compute_stream):
+            return func(*args, **kwargs)
+
+
 def make_ubatch_contexts(
     num_micro_batches: int,
     compute_stream: torch.npu.Stream,
@@ -245,42 +274,26 @@ def make_ubatch_contexts(
     assert len(forward_contexts) == 2
 
     ctxs = []
+    current_microbatch_stream = compute_stream
+    other_microbatch_stream = comm_stream
     for i in range(num_micro_batches):
         if i == 0:
-            ctx = AscendUBatchContext(
-                id=i,
-                compute_stream=compute_stream,
-                comm_stream=comm_stream,
-                forward_context=forward_contexts[i],
-                ready_barrier=ready_barrier,
-                cpu_wait_event=cpu_events[i],
-                cpu_signal_event=cpu_events[(i + 1) % num_micro_batches],
-                gpu_comm_done_event=gpu_comm_done_events[i],
-                gpu_compute_done_event=gpu_compute_done_events[i],
-                schedule=schedule)
-            ctxs.append(ctx)
+            current_microbatch_stream = compute_stream
+            other_microbatch_stream = comm_stream
         else:
-            ctx = AscendUBatchContext(
-                id=i,
-                compute_stream=comm_stream,
-                comm_stream=compute_stream,
-                forward_context=forward_contexts[i],
-                ready_barrier=ready_barrier,
-                cpu_wait_event=cpu_events[i],
-                cpu_signal_event=cpu_events[(i + 1) % num_micro_batches],
-                gpu_comm_done_event=gpu_comm_done_events[i],
-                gpu_compute_done_event=gpu_compute_done_events[i],
-                schedule=schedule)
-            ctxs.append(ctx)
+            current_microbatch_stream = comm_stream
+            other_microbatch_stream = compute_stream
+        ctx = AscendUBatchContext(
+            id=i,
+            compute_stream=current_microbatch_stream,
+            comm_stream=other_microbatch_stream,
+            forward_context=forward_contexts[i],
+            ready_barrier=ready_barrier,
+            cpu_wait_event=cpu_events[i],
+            cpu_signal_event=cpu_events[(i + 1) % num_micro_batches],
+            gpu_comm_done_event=gpu_comm_done_events[i],
+            gpu_compute_done_event=gpu_compute_done_events[i],
+            schedule=schedule)
+        ctxs.append(ctx)
 
     return ctxs
-
-
-@contextmanager
-def set_ubatch_stream_limit_context(cube_num: int, vector_num: int):
-    # set the cube/vector num for hccl comm kernel
-    torch.npu.set_stream_limit(dbo_current_stream(), cube_num, vector_num)
-    try:
-        yield
-    finally:
-        torch.npu.reset_stream_limit(dbo_current_stream())

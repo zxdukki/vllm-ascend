@@ -52,6 +52,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(
     if sp_enabled and label:
         dp_metadata = forward_context.dp_metadata
         if dp_metadata is None or not is_ep_comm:
+            # for better overlap when enabling dbo
             if do_comm:
                 x = tensor_model_parallel_all_gather(x, 0)
             pad_size = forward_context.pad_size
@@ -98,6 +99,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor,
         pad_size = forward_context.pad_size
         if pad_size > 0:
             x = F.pad(x, (0, 0, 0, pad_size))
+        # for better overlap when enabling dbo
         if do_comm:
             x = tensor_model_parallel_reduce_scatter(x, 0)
         return x

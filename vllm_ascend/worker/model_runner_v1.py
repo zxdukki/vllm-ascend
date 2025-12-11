@@ -117,7 +117,7 @@ from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.npu_ubatch_wrapper import AscendUBatchWrapper
-from vllm_ascend.worker.ubatch_splitting import ubatch_split
+from vllm_ascend.worker.ubatch_utils import ubatch_split
 from vllm_ascend.attention.utils import split_attn_metadata
 from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
 
@@ -146,7 +146,6 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = Union[list[AttnMetadataDict],
                                         AttnMetadataDict]
-
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
@@ -496,7 +495,7 @@ class NPUModelRunner(GPUModelRunner):
         flags_tensor = torch.tensor(
             [int(with_prefill), int(enable_dbo)],
             dtype=torch.int32,
-            device="npu")
+            device="cpu")
 
         packed_tensor = torch.cat([num_tokens_tensor, flags_tensor])
         # use cpu_group to avoid cpu synchronization issue.
@@ -690,26 +689,7 @@ class NPUModelRunner(GPUModelRunner):
                                                   * self.uniform_decode_query_len + cu_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
 
-        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_tokens_padded = num_tokens_unpadded + self.get_local_padding(
-            num_tokens_unpadded)
-        uniform_decode = \
-            (max_num_scheduled_tokens == self.uniform_decode_query_len) and \
-            (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-
-        moe_comm_type = self._select_moe_comm_method(num_input_tokens)
-        ubatch_slices, num_tokens_after_padding = \
-            ubatch_split(num_scheduled_tokens,
-                         num_tokens_unpadded,
-                         num_tokens_padded,
-                         uniform_decode=uniform_decode,
-                         vllm_config=self.vllm_config,
-                         moe_comm_type=moe_comm_type,
-                         use_mla = self.model_config.use_mla)
-        if not enable_dbo:
-            ubatch_slices = None
-            num_tokens_after_padding = None
-        self.seq_lens_np[:num_reqs] = (
+        self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
         self.seq_lens.copy_to_gpu()
@@ -935,9 +915,8 @@ class NPUModelRunner(GPUModelRunner):
 
         return logits_indices, spec_decode_metadata
 
-    def _generate_process_reqs_hidden_states(self, num_input_tokens,
-                                             input_ids, positions,
-                                             intermediate_tensors,
+    def _generate_process_reqs_hidden_states(self, num_input_tokens, input_ids,
+                                             positions, intermediate_tensors,
                                              inputs_embeds, model_kwargs):
         assert self.model is not None
         hidden_states = self.model(input_ids=input_ids,
@@ -949,8 +928,9 @@ class NPUModelRunner(GPUModelRunner):
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
             and not self.use_sparse:
-            update_full_graph_params(self.attn_backend, self.update_stream, forward_context,
-                                     num_input_tokens, self.vllm_config,
+            update_full_graph_params(self.attn_backend, self.update_stream,
+                                     forward_context, num_input_tokens,
+                                     self.vllm_config,
                                      self.vllm_config.speculative_config)
 
         if get_forward_context().sp_enabled and not get_forward_context(
@@ -1166,14 +1146,16 @@ class NPUModelRunner(GPUModelRunner):
                             query_start_loc_pcp_full[1:num_reqs + 1] - 1
                         target_token_ids = input_ids_pcp_full[:
                                                               num_scheduled_tokens]
-                        target_positions = self._get_positions(num_scheduled_tokens)
+                        target_positions = self._get_positions(
+                            num_scheduled_tokens)
                         target_hidden_states = hidden_states
                     else:
                         token_indices_to_sample = None
                         # input_ids can be None for multimodal models.
                         target_token_ids = self.input_ids.gpu[:
                                                               num_scheduled_tokens]
-                        target_positions = self._get_positions(num_scheduled_tokens)
+                        target_positions = self._get_positions(
+                            num_scheduled_tokens)
                         if self.use_aux_hidden_state_outputs:
                             target_hidden_states = torch.cat([
                                 h[:num_scheduled_tokens]

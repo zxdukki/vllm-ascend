@@ -499,7 +499,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 hidden_states, 0)
         else:
             hidden_states = get_ep_group().reduce_scatter(hidden_states, 0)
-        # TODO: choosing different overlap policy for different models
         return hidden_states
 
     def _finalize_with_dp_group(self, hidden_states: torch.Tensor,

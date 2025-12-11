@@ -401,9 +401,9 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             output = output_parallel
 
         # A3 DBO for FC2, only yield to other batch but donot wait event here
-        #if get_forward_context().moe_comm_type == MoECommType.ALLTOALL:
-        #    dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_POST,
-        #                                      wait=False)
+        if get_forward_context().moe_comm_type == MoECommType.ALLTOALL:
+            dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_POST,
+                                              wait=False)
 
         if not forward_context.sp_enabled:
             # flashcomm1 not enabled
@@ -490,9 +490,12 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
-        #TODO: overlap mlp layers for ds
-        # is_ep_comm is False
+        # dbo overlap for qwen3 moe with flashcomm1
+        if get_forward_context().dbo_first_layer_sync:
+            dbo_record_current_stream(event=UBatchEventKey.ATTN_PRE)
+            get_forward_context().dbo_first_layer_sync = False
         input_ = tensor_model_parallel_all_gather(input_, 0)
+        dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_PRE)
 
         input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_,
                                                                  True,
