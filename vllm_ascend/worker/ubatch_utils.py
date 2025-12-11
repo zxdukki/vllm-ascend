@@ -9,13 +9,14 @@ import torch.distributed as dist
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.forward_context import DPMetadata
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatch_utils import (UBatchSlice, UBatchSlices,
                                          is_second_ubatch_empty,
                                          check_ubatch_thresholds)
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.utils import dbo_current_stream
+from vllm_ascend.worker.npu_ubatch_wrapper import NPUCoreControlContextManager
 
 logger = init_logger(__name__)
 
@@ -219,10 +220,6 @@ def ubatch_split(
     if not parallel_config.enable_dbo:
         return (None, None)
 
-    # currently, dbo is not enabled when using MC2
-    if moe_comm_type == MoECommType.MC2:
-        return (None, None)
-
     # Check preconditions for microbatching
     should_attempt_ubatching = check_ubatch_thresholds(
         parallel_config,
@@ -238,7 +235,7 @@ def ubatch_split(
         vllm_config,
     )
 
-    if not should_ubatch:
+    if not should_ubatch or moe_comm_type == MoECommType.MC2:
         return (None, None)
 
     # This doesn't actually pad the ubatch slices. It just initializes the
@@ -267,3 +264,21 @@ def ubatch_split(
                                          token_split_point, use_mla)
 
     return (ubatch_slices, num_tokens_after_padding)
+
+
+def create_core_control_context(aic_core: int, aiv_core: int):
+    comm_aic_core = aic_core
+    comm_aiv_core = aiv_core
+    current_stream = dbo_current_stream()
+
+    set_comm_core_limit = lambda aic_core, aiv_core: torch.npu.set_stream_limit(  # noqa: E731
+        current_stream, cube_num=aic_core, vector_num=aiv_core)
+    reset_comm_core_limit = lambda stream: torch.npu.reset_stream_limit(stream)
+    set_comp_core_limit = lambda aic_core, aiv_core: None
+    return NPUCoreControlContextManager(
+        comm_aiv_core=comm_aiv_core,
+        comm_aic_core=comm_aic_core,
+        curren_stream=current_stream,
+        set_comm_core_limit=set_comm_core_limit,
+        reset_comm_core_limit=reset_comm_core_limit,
+        set_compute_core_limit=set_comp_core_limit)
