@@ -42,46 +42,54 @@ class AscendNPUGraphMetaData(CUDAGraphMetaData):
 
 
 # TODO: adpat to npu arch
-class SMControlContextManager:
+class NPUCoreControlContextManager:
 
-    def __init__(self, comm_sms: int, set_comm_sms: Callable[[int], None],
-                 set_compute_sms: Callable[[int], None]):
+    def __init__(self, comm_aiv_core: int, comm_aic_core: int,
+                 set_comm_core_limit: Callable[[int, int], None],
+                 set_compute_core_limit: Callable[[int, int], None]):
         """
-        Context manager for controlling SM (Streaming Multiprocessor) 
-        allocation. Upon entering the context, it sets the number of SMs
-        allocated for communication and computation to comm_sms and
-        total_sms - comm_sms respectively. Upon exiting, it restores the
-        allocation to use all available SMs (i.e. total_sms).
+        Context manager for controlling aiv/aic core num. 
+        Upon entering the context, it sets the number of cores
+        allocated for communication and computation to comm_core and
+        total_cores - comm_core respectively. Upon exiting, it restores the
+        allocation to use all available npu cores.
 
         Args:
-            comm_sms (int): The number of SMs to allocate for communication. 
+            comm_aiv_core (int): The number of aiv cores to allocate for communication. 
                 (The remainder will be used for computation.)
-            set_comm_sms (Callable[[int], None]): 
-                A function that sets the number of SMs for communication.
-            set_compute_sms (Callable[[int], None]): 
-                A function that sets the number of SMs for computation.
+            comm_aic_core (int): The number of aic cores to allocate for communication. 
+                (The remainder will be used for computation.)
+            set_comm_core_limit (Callable[[int], None]): 
+                A function that sets the number of aiv/aic for communication.
+            set_compute_core_limit (Callable[[int], None]): 
+                A function that sets the number of aiv/aic for computation.
         """
 
-        assert current_platform.is_cuda(), \
-            "SM control is currently only supported on CUDA"
+        props = torch.npu.get_device_limit(torch.npu.current_device())
+        # TODO: check whether it is works or not
+        cube_core_num = props["cube_core_num"]
+        vector_core_num = props["vector_core_num"]
 
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        total_sms = props.multi_processor_count
+        assert comm_aic_core < cube_core_num
+        assert comm_aiv_core < vector_core_num
+        self.total_cube_core = cube_core_num - comm_aic_core
+        self.total_vector_core = vector_core_num - comm_aiv_core
+        self.comm_aic_core = comm_aic_core
+        self.comm_aiv_core = comm_aiv_core
+        self.comp_aic_core = self.total_cube_core - comm_aic_core
+        self.comp_aiv_core = self.total_vector_core - comm_aiv_core
 
-        assert comm_sms < total_sms
-        self.total_sms = total_sms
-        self.compute_sms = total_sms - comm_sms
-        self.comm_sms = comm_sms
-        self.set_comm_sms = set_comm_sms
-        self.set_compute_sms = set_compute_sms
+        self.set_comm_core_limit = set_comm_core_limit
+        self.set_compute_core_limit = set_compute_core_limit
 
     def __enter__(self):
-        self.set_comm_sms(self.comm_sms)
-        self.set_compute_sms(self.compute_sms)
+        self.set_comm_core_limit(self.comm_aic_core, self.comm_aiv_core)
+        #self.set_compute_core_limit(self.comp_aic_core, self.comp_aiv_core)
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.set_comm_sms(self.total_sms)
-        self.set_compute_sms(self.total_sms)
+        self.set_comm_core_limit(self.total_cube_core, self.total_vector_core)
+        #self.set_compute_core_limit(self.total_cube_core,
+        #                            self.total_vector_core)
 
 
 class AscendUBatchWrapper:
@@ -104,36 +112,24 @@ class AscendUBatchWrapper:
                 runnable, vllm_config, runtime_mode=runtime_mode)
             self.graph_pool = current_platform.get_global_graph_pool()
 
-        #self.sm_control = self._create_sm_control_context(vllm_config)
+        self.core_control = self._create_core_control_context(vllm_config)
         self.device = device
 
     # TODO: adapt to hw npu resource control logic
     @staticmethod
-    def _create_sm_control_context(vllm_config: VllmConfig):
-        comm_sms = envs.VLLM_DBO_COMM_SMS
+    def _create_core_control_context(vllm_config: VllmConfig):
+        comm_aic_core = -1
+        comm_aiv_core = 10
+        stream = dbo_current_stream()
 
-        set_comm_sms = lambda sms: None
-        if vllm_config.parallel_config.enable_expert_parallel:
-            # Currently only DeepEP highthroughput supports SM control so this
-            # only affects that case.
-            all2all_manager = get_ep_group(
-            ).device_communicator.all2all_manager
-
-            if all2all_manager.max_sms_used() is not None:
-                comm_sms = min(comm_sms, all2all_manager.max_sms_used())
-
-            if comm_sms > 0:
-                set_comm_sms = lambda sms: all2all_manager.set_num_sms(sms)
-
-        # TODO(lucas): support other kernels besides DeepGEMM
-        set_compute_sms = lambda sms: None
-        '''if has_deep_gemm() and comm_sms > 0:
-            import deep_gemm as dg
-            set_compute_sms = lambda sms: dg.set_num_sms(sms)'''
-
-        return SMControlContextManager(comm_sms=comm_sms,
-                                       set_comm_sms=set_comm_sms,
-                                       set_compute_sms=set_compute_sms)
+        set_comm_core_limit = lambda aic_core, aiv_core: torch.npu.set_stream_limit(
+            stream, cube_num=aic_core, vector_num=aiv_core)
+        set_comp_core_limit = lambda aic_core, aiv_core: None
+        return NPUCoreControlContextManager(
+            comm_aiv_core=comm_aiv_core,
+            comm_aic_core=comm_aic_core,
+            set_comm_core_limit=set_comm_core_limit,
+            set_compute_core_limit=set_comp_core_limit)
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -258,8 +254,6 @@ class AscendUBatchWrapper:
         with override_forward_context(None):
             ubatch_threads = []
             for metadata in ubatch_metadata:
-                # For testing split logic
-                #_ubatch_thread(results, model, metadata)
                 thread = threading.Thread(target=_ubatch_thread,
                                           args=(
                                               results,
@@ -272,7 +266,6 @@ class AscendUBatchWrapper:
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
-        #torch.npu.synchronize()
         sorted_results = [value for position, value in sorted(results)]
         # if enable sp, we should unpad the model output first
         if get_forward_context().sp_enabled and get_pp_group().is_last_rank:
@@ -428,7 +421,6 @@ class AscendUBatchWrapper:
                 dp_metadata=dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
-            #with self.sm_control:
             return self._capture_ubatches(ubatch_metadata, self.model)
         elif num_tokens in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
@@ -447,7 +439,6 @@ class AscendUBatchWrapper:
                 dp_metadata=dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
-            #with self.sm_control:
             return self._run_ubatches(ubatch_metadata, self.model)
 
     def _merge_intermediate_tensors(self, intermediate_tensor_list):

@@ -153,7 +153,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_moe_model, lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 from vllm_ascend.worker.npu_ubatch_wrapper import AscendUBatchWrapper
-from vllm_ascend.worker.ubatch_splitting import ubatch_split
+from vllm_ascend.worker.ubatch_utils import ubatch_split
 from vllm_ascend.attention.utils import split_attn_metadata
 from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
 
@@ -1536,12 +1536,35 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
+        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+        num_tokens_padded = num_tokens_unpadded + self.get_local_padding(
+            num_tokens_unpadded)
+        uniform_decode = \
+            (max_num_scheduled_tokens == self.uniform_decode_query_len) and \
+            (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
+        moe_comm_type = self._select_moe_comm_method(num_input_tokens)
+        ubatch_slices, num_tokens_after_padding = \
+            ubatch_split(num_scheduled_tokens,
+                         num_tokens_unpadded,
+                         num_tokens_padded,
+                         uniform_decode=uniform_decode,
+                         vllm_config=self.vllm_config,
+                         moe_comm_type=moe_comm_type,
+                         use_mla = self.model_config.use_mla)
+        if ubatch_slices is not None:
+            enable_dbo = True
+        else:
+            enable_dbo = False
+
         # Get info across DP ranks.
         # NOTE: maybe_padded_num_tokens is only used when using TorchAir with DP,
         # Otherwise, it's just max_tokens_across_dp_cpu
         (maybe_padded_num_tokens, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._sync_metadata_across_dp(num_input_tokens,
-                                                     with_prefill, True)
+                                                     with_prefill, enable_dbo)
+
+        if not enable_dbo:
+            ubatch_slices = None
 
         # TODO: Now that num_input_tokens is basically identical with maybe_padded_num_tokens
         # We should consider removing maybe_padded_num_tokens later
@@ -1646,25 +1669,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.query_start_loc[:num_reqs + 1].copy_(
             self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
 
-        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_tokens_padded = num_tokens_unpadded + self.get_local_padding(
-            num_tokens_unpadded)
-        uniform_decode = \
-            (max_num_scheduled_tokens == self.uniform_decode_query_len) and \
-            (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-
-        moe_comm_type = self._select_moe_comm_method(num_input_tokens)
-        ubatch_slices, num_tokens_after_padding = \
-            ubatch_split(num_scheduled_tokens,
-                         num_tokens_unpadded,
-                         num_tokens_padded,
-                         uniform_decode=uniform_decode,
-                         vllm_config=self.vllm_config,
-                         moe_comm_type=moe_comm_type,
-                         use_mla = self.model_config.use_mla)
-        if not enable_dbo:
-            ubatch_slices = None
-            num_tokens_after_padding = None
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
@@ -4970,15 +4974,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             # Add padding to the batch size.
             num_tokens_padded = self.vllm_config.pad_for_cudagraph(
                 num_tokens_unpadded)
-        else:
-            # Eager mode.
-            # Pad tokens to multiple of tensor_parallel_size when
-            # enabled collective fusion for SP
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            #if self.vllm_config.compilation_config.pass_config. \
-            #    enable_sequence_parallelism and tp_size > 1:
-            #    num_tokens_padded = round_up(num_tokens_unpadded, tp_size)
-
         num_pad_tokens = num_tokens_padded - num_tokens_unpadded
         return num_pad_tokens
 
