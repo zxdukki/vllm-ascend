@@ -3192,14 +3192,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         if self.is_kv_producer and not self.is_kv_consumer:
             with_prefill = True
 
-        # Padding for DP
-        # currently, we check the dp scenario that some ranks have tokens
-        # but others execute dummy run
-        (num_tokens, num_tokens_across_dp, with_prefill,
-         enable_dbo) = self._sync_metadata_across_dp(num_tokens, with_prefill,
-                                                     False)
-        moe_comm_type = self._select_moe_comm_method(num_tokens)
-
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using
         # different graphs and/or modes for mixed prefill-decode batches vs.
@@ -3215,13 +3207,11 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # for GQA/MQA.
         max_query_len = self.uniform_decode_query_len if uniform_decode else \
                                                                 num_tokens
-
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.max_num_reqs
-
         # TODO: create_mixed_batch should be Fasle in Ascend now
         if uniform_decode:
             num_reqs = cdiv(num_tokens, max_query_len)
@@ -3249,6 +3239,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         ubatch_slices = None
         num_tokens_after_padding = None
 
+        moe_comm_type = self._select_moe_comm_method(num_tokens)
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         if self.parallel_config.enable_dbo and allow_microbatching:
@@ -3261,26 +3252,20 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 moe_comm_type=moe_comm_type,
             )
 
-            # Currently when DBO is enabled `ubatch_split` returns
-            # the num_tokens_after_padding for a single ubatch, but we have 2
-            # TODO(sage,lucas): this is cruft that should be addressed in the
-            # padding refactor.
-            if ubatch_num_tokens_after_padding is not None:
-                num_tokens_after_padding = ubatch_num_tokens_after_padding * 2
+        # Padding for DP
+        # currently, we check the dp scenario that some ranks have tokens
+        # but others execute dummy run
+        if ubatch_slices is not None:
+            enable_dbo = True
+        else:
+            enable_dbo = False
 
+        (num_tokens, num_tokens_across_dp, with_prefill,
+         enable_dbo) = self._sync_metadata_across_dp(num_tokens, with_prefill,
+                                                     enable_dbo)
+        moe_comm_type = self._select_moe_comm_method(num_tokens)
         if not enable_dbo:
             ubatch_slices = None
-            ubatch_num_tokens_after_padding = None
-        # If we failed to microbatch, currently need to resynchronize
-        # TODO(lucas,sage): we should be able to avoid this second sync by
-        #  refactoring `get_dp_padding_ubatch` and `get_dp_padding` into
-        #  a single `coordinate_batch_across_dp` function.
-        '''if num_tokens_after_padding is None:
-            num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
-            num_tokens_after_padding = num_tokens + num_pad
-        else:
-            num_tokens_across_dp = num_tokens_after_padding
-            num_tokens_after_padding = int(num_tokens_after_padding[0].item())'''
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 

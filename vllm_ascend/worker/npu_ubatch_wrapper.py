@@ -21,8 +21,8 @@ from vllm.sequence import IntermediateTensors
 #from vllm.utils import has_deep_gemm
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.v1.worker.gpu_ubatch_wrapper import UbatchMetadata, CUDAGraphMetaData
-from vllm_ascend.utils import enable_sp
-from vllm_ascend.worker.ubatching import make_ubatch_contexts, dbo_yield, dbo_current_stream
+from vllm_ascend.utils import enable_sp, dbo_current_stream
+from vllm_ascend.worker.ubatching import make_ubatch_contexts, dbo_yield
 from vllm_ascend.ascend_forward_context import create_ascend_forward_context
 
 logger = init_logger(__name__)
@@ -45,7 +45,9 @@ class AscendNPUGraphMetaData(CUDAGraphMetaData):
 class NPUCoreControlContextManager:
 
     def __init__(self, comm_aiv_core: int, comm_aic_core: int,
-                 set_comm_core_limit: Callable[[int, int], None],
+                 curren_stream: Any, set_comm_core_limit: Callable[[int, int],
+                                                                   None],
+                 reset_comm_core_limit: Callable[[Any], None],
                  set_compute_core_limit: Callable[[int, int], None]):
         """
         Context manager for controlling aiv/aic core num. 
@@ -78,8 +80,10 @@ class NPUCoreControlContextManager:
         self.comm_aiv_core = comm_aiv_core
         self.comp_aic_core = self.total_cube_core - comm_aic_core
         self.comp_aiv_core = self.total_vector_core - comm_aiv_core
+        self.current_stream = curren_stream
 
         self.set_comm_core_limit = set_comm_core_limit
+        self.reset_comm_core_limit = reset_comm_core_limit
         self.set_compute_core_limit = set_compute_core_limit
 
     def __enter__(self):
@@ -87,9 +91,8 @@ class NPUCoreControlContextManager:
         #self.set_compute_core_limit(self.comp_aic_core, self.comp_aiv_core)
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.set_comm_core_limit(self.total_cube_core, self.total_vector_core)
-        #self.set_compute_core_limit(self.total_cube_core,
-        #                            self.total_vector_core)
+        self.reset_comm_core_limit(self.current_stream)
+        pass
 
 
 class AscendUBatchWrapper:
@@ -112,24 +115,7 @@ class AscendUBatchWrapper:
                 runnable, vllm_config, runtime_mode=runtime_mode)
             self.graph_pool = current_platform.get_global_graph_pool()
 
-        self.core_control = self._create_core_control_context(vllm_config)
         self.device = device
-
-    # TODO: adapt to hw npu resource control logic
-    @staticmethod
-    def _create_core_control_context(vllm_config: VllmConfig):
-        comm_aic_core = -1
-        comm_aiv_core = 10
-        stream = dbo_current_stream()
-
-        set_comm_core_limit = lambda aic_core, aiv_core: torch.npu.set_stream_limit(
-            stream, cube_num=aic_core, vector_num=aiv_core)
-        set_comp_core_limit = lambda aic_core, aiv_core: None
-        return NPUCoreControlContextManager(
-            comm_aiv_core=comm_aiv_core,
-            comm_aic_core=comm_aic_core,
-            set_comm_core_limit=set_comm_core_limit,
-            set_compute_core_limit=set_comp_core_limit)
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
