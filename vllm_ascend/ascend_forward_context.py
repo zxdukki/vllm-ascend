@@ -125,6 +125,8 @@ def set_ascend_forward_context(
         # set this for record cos/sin cache when enabling dbo
         forward_context.cos = None
         forward_context.sin = None
+        forward_context.cos_mla = None
+        forward_context.sin_mla = None
         forward_context.dbo_enabled = False
         # set this for sync dbo in the first layer after embedding
         forward_context.dbo_first_layer_sync = True
@@ -190,13 +192,15 @@ def create_ascend_forward_context(
         cur_forward_context: Any,
         attn_metadata: Any,
         vllm_config: VllmConfig,
+        ubatch_slices: list[UBatchSlices],
         virtual_engine: int = 0,
+        ubatch_num: int = 0,
         dp_metadata: DPMetadata | None = None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: BatchDescriptor | None = None,
-        ubatch_slices: UBatchSlices | None = None,
         reserved_mc2_mask: torch.Tensor | None = None,
-        ubatch_num: int = 0):
+        positions: Any = None):
+
     new_forward_context = ForwardContext(
         no_compile_layers=vllm_config.compilation_config.
         static_forward_context,
@@ -269,8 +273,34 @@ def create_ascend_forward_context(
 
     new_forward_context.dbo_enabled = True
     new_forward_context.dbo_first_layer_sync = True
-    new_forward_context.cos = None
-    new_forward_context.sin = None
+
+    # vllm-ascend use global cos/sin cache, which should be sliced when using dbo
+    from vllm_ascend.ops.rotary_embedding import update_cos_sin, get_cos_and_sin_slice, get_cos_and_sin_mla
+    if ubatch_slices and ubatch_slices[ubatch_num]:
+        token_slice = ubatch_slices[ubatch_num].token_slice
+        positions = positions[token_slice]
+        # slice cos_mla/sin_mla for dbo
+        num_speculative_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config else 0)
+        decode_token_per_req = 1 + num_speculative_tokens
+        mla_slice = slice(
+            ubatch_slices[ubatch_num].request_slice.start *
+            decode_token_per_req,
+            ubatch_slices[ubatch_num].request_slice.stop *
+            decode_token_per_req)
+        update_cos_sin(positions)
+        new_forward_context.cos, new_forward_context.sin = get_cos_and_sin_slice(
+        )
+
+        cos_mla, sin_mla = get_cos_and_sin_mla()
+
+        new_forward_context.cos_mla = cos_mla[
+            mla_slice] if cos_mla is not None else None
+
+        new_forward_context.sin_mla = sin_mla[
+            mla_slice] if sin_mla is not None else None
+
     return new_forward_context
 
 

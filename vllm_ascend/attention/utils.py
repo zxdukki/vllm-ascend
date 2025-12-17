@@ -424,7 +424,7 @@ def _make_metadata_with_slice(
             range(attn_metadata.decode_token_per_req, max_num_tokens + 1,
                   attn_metadata.decode_token_per_req))
     else:
-        actual_seq_lengths_q: list[int] = []
+        actual_seq_lengths_q = []
 
     return AscendCommonAttentionMetadata(
         query_start_loc=query_start_loc,

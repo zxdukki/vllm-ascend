@@ -198,7 +198,7 @@ def ubatch_split(
     num_tokens_padded: int,
     uniform_decode: bool,
     vllm_config: VllmConfig,
-    moe_comm_type: MoECommType,
+    moe_comm_type: Optional[MoECommType],
     use_mla: bool = True,
 ) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
     """
@@ -271,14 +271,6 @@ def create_core_control_context(aic_core: int, aiv_core: int):
     comm_aiv_core = aiv_core
     current_stream = dbo_current_stream()
 
-    set_comm_core_limit = lambda aic_core, aiv_core: torch.npu.set_stream_limit(  # noqa: E731
-        current_stream, cube_num=aic_core, vector_num=aiv_core)
-    reset_comm_core_limit = lambda stream: torch.npu.reset_stream_limit(stream)
-    set_comp_core_limit = lambda aic_core, aiv_core: None
-    return NPUCoreControlContextManager(
-        comm_aiv_core=comm_aiv_core,
-        comm_aic_core=comm_aic_core,
-        curren_stream=current_stream,
-        set_comm_core_limit=set_comm_core_limit,
-        reset_comm_core_limit=reset_comm_core_limit,
-        set_compute_core_limit=set_comp_core_limit)
+    return NPUCoreControlContextManager(comm_aiv_core=comm_aiv_core,
+                                        comm_aic_core=comm_aic_core,
+                                        curren_stream=current_stream)

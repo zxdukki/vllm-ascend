@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 #from vllm.utils import has_deep_gemm
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.v1.worker.gpu_ubatch_wrapper import UbatchMetadata, CUDAGraphMetaData
+from vllm.v1.worker.gpu_ubatch_wrapper import UbatchMetadata
 from vllm_ascend.utils import enable_sp, dbo_current_stream
 from vllm_ascend.worker.ubatching import make_ubatch_contexts, dbo_yield
 from vllm_ascend.ascend_forward_context import create_ascend_forward_context
@@ -35,19 +35,16 @@ class AscendUbatchMetadata(UbatchMetadata):
 
 # TODO: adapt to npu graph mode
 @dataclass
-class AscendNPUGraphMetaData(CUDAGraphMetaData):
-    aclgraph: torch.npu.NPUGraph = None
-    ubatch_metadata: AscendUbatchMetadata = None
+class AscendNPUGraphMetaData:
+    aclgraph: torch.npu.NPUGraph
+    ubatch_metadata: AscendUbatchMetadata
     outputs: Optional[Any] = None
 
 
 class NPUCoreControlContextManager:
 
     def __init__(self, comm_aiv_core: int, comm_aic_core: int,
-                 curren_stream: Any, set_comm_core_limit: Callable[[int, int],
-                                                                   None],
-                 reset_comm_core_limit: Callable[[Any], None],
-                 set_compute_core_limit: Callable[[int, int], None]):
+                 curren_stream: Any):
         """
         Context manager for controlling aiv/aic core num. 
         Upon entering the context, it sets the number of cores
@@ -80,17 +77,13 @@ class NPUCoreControlContextManager:
         self.comp_aiv_core = self.total_vector_core - comm_aiv_core
         self.current_stream = curren_stream
 
-        self.set_comm_core_limit = set_comm_core_limit
-        self.reset_comm_core_limit = reset_comm_core_limit
-        self.set_compute_core_limit = set_compute_core_limit
-
     def __enter__(self):
-        self.set_comm_core_limit(self.comm_aic_core, self.comm_aiv_core)
-        #self.set_compute_core_limit(self.comp_aic_core, self.comp_aiv_core)
+        torch.npu.set_stream_limit(self.current_stream,
+                                   cube_num=self.comm_aic_core,
+                                   vector_num=self.comm_aiv_core)
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.reset_comm_core_limit(self.current_stream)
-        pass
+        torch.npu.reset_stream_limit(self.current_stream)
 
 
 class AscendUBatchWrapper:
@@ -189,14 +182,14 @@ class AscendUBatchWrapper:
             # Capture the cudagraph
             cudagraph_metadata = \
                 AscendNPUGraphMetaData(
-                            cudagraph=torch.npu.NPUGraph(),
+                            aclgraph=torch.npu.NPUGraph(),
                             ubatch_metadata=ubatch_metadata,
                         )
             if self.graph_pool is not None:
                 set_graph_pool_id(self.graph_pool)
             else:
                 set_graph_pool_id(current_platform.graph_pool_handle())
-            with torch.npu.graph(cudagraph_metadata.cudagraph,
+            with torch.npu.graph(cudagraph_metadata.aclgraph,
                                  stream=compute_stream,
                                  pool=self.graph_pool):
                 ubatch_metadata[0].context.cpu_wait_event.set()
@@ -288,9 +281,11 @@ class AscendUBatchWrapper:
                     if attn_metadata is not None else None,
                     vllm_config=self.vllm_config,
                     dp_metadata=dp_metadata,
+                    ubatch_slices=ubatch_slices,
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     ubatch_num=i,
+                    positions=positions,
                 ))
 
         ubatch_ctxs = make_ubatch_contexts(
@@ -410,7 +405,7 @@ class AscendUBatchWrapper:
         elif num_tokens in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             cudagraph_metadata = self.cudagraphs[num_tokens]
-            cudagraph_metadata.cudagraph.replay()
+            cudagraph_metadata.aclgraph.replay()
             return cudagraph_metadata.outputs
         else:
             ubatch_metadata = self._make_ubatch_metadata(

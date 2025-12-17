@@ -494,8 +494,9 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         if get_forward_context().dbo_first_layer_sync:
             dbo_record_current_stream(event=UBatchEventKey.ATTN_PRE)
             get_forward_context().dbo_first_layer_sync = False
-        input_ = tensor_model_parallel_all_gather(input_, 0)
-        dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_PRE)
+        if get_forward_context().sp_enabled:
+            input_ = tensor_model_parallel_all_gather(input_, 0)
+            dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_PRE)
 
         input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_,
                                                                  True,

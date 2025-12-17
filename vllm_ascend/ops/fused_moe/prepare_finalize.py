@@ -376,23 +376,24 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                     pertoken_scale, True, True)
         else:
-
-            if get_forward_context().dp_metadata is None:
-                hidden_states = tensor_model_parallel_all_gather(
-                    hidden_states, 0)
-                router_logits = tensor_model_parallel_all_gather(
-                    router_logits, 0)
-                if pertoken_scale is not None:
-                    pertoken_scale = tensor_model_parallel_all_gather(
-                        pertoken_scale, 0)
-            else:
-                hidden_states = get_ep_group().all_gather(hidden_states, 0)
-                router_logits = get_ep_group().all_gather(router_logits, 0)
-                if pertoken_scale is not None:
-                    pertoken_scale = get_ep_group().all_gather(
-                        pertoken_scale, 0)
-            # A2 DBO for FC1/FC2, overlap the comm of o_proj + moe prepare
-            dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_POST)
+            if get_forward_context().sp_enabled:
+                if get_forward_context().dp_metadata is None:
+                    hidden_states = tensor_model_parallel_all_gather(
+                        hidden_states, 0)
+                    router_logits = tensor_model_parallel_all_gather(
+                        router_logits, 0)
+                    if pertoken_scale is not None:
+                        pertoken_scale = tensor_model_parallel_all_gather(
+                            pertoken_scale, 0)
+                else:
+                    hidden_states = get_ep_group().all_gather(hidden_states, 0)
+                    router_logits = get_ep_group().all_gather(router_logits, 0)
+                    if pertoken_scale is not None:
+                        pertoken_scale = get_ep_group().all_gather(
+                            pertoken_scale, 0)
+                # A2 DBO for FC1/FC2, overlap the comm of o_proj + moe prepare
+                dbo_wait_current_stream_and_yield(
+                    event=UBatchEventKey.ATTN_POST)
 
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states, True, True, False)
@@ -494,11 +495,14 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                                                             do_comm=False)
         # A2 DBO for FC1/FC2, overlap the moe finalize + mla allgather
         dbo_record_current_stream(event=UBatchEventKey.ATTN_PRE)
-        if get_forward_context().dp_metadata is None:
-            hidden_states = tensor_model_parallel_reduce_scatter(
-                hidden_states, 0)
+        if get_forward_context().sp_enabled:
+            if get_forward_context().dp_metadata is None:
+                hidden_states = tensor_model_parallel_reduce_scatter(
+                    hidden_states, 0)
+            else:
+                hidden_states = get_ep_group().reduce_scatter(hidden_states, 0)
         else:
-            hidden_states = get_ep_group().reduce_scatter(hidden_states, 0)
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return hidden_states
 
     def _finalize_with_dp_group(self, hidden_states: torch.Tensor,

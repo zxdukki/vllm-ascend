@@ -1567,12 +1567,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             dbo_record_current_stream(event=UBatchEventKey.ATTN_PRE)
             get_forward_context().dbo_first_layer_sync = False
 
-        q_c = tensor_model_parallel_all_gather(q_c.contiguous(), 0)
+        if get_forward_context().sp_enabled and need_gather_q_kv:
+            q_c = tensor_model_parallel_all_gather(q_c.contiguous(), 0)
 
-        kv_no_split = tensor_model_parallel_all_gather(
-            kv_no_split.contiguous(), 0)
+            kv_no_split = tensor_model_parallel_all_gather(
+                kv_no_split.contiguous(), 0)
 
-        dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_PRE)
+            dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_PRE)
         q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c,
                                                               need_gather_q_kv,
                                                               do_comm=False)
