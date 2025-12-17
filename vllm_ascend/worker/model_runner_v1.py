@@ -118,7 +118,7 @@ from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.npu_ubatch_wrapper import AscendUBatchWrapper
 from vllm_ascend.worker.ubatch_utils import ubatch_split
 from vllm_ascend.attention.utils import split_attn_metadata
-from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
+from vllm.v1.worker.ubatch_utils import UBatchSlices
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType, get_mc2_tokens_capacity, select_moe_comm_method,
@@ -199,7 +199,7 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
-    attn_metadata: dict[str, Any]
+    attn_metadata: PerLayerAttnMetadata
     positions: torch.Tensor
 
 
@@ -509,8 +509,7 @@ class NPUModelRunner(GPUModelRunner):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-        intermediate_tensors: Optional[IntermediateTensors]
-        | Optional[List[IntermediateTensors]] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> tuple[PerLayerAttnMetadata, torch.Tensor, np.ndarray, int,
                torch.Tensor, int, torch.Tensor, SpecDecodeMetadata,
                Optional[torch.Tensor], Optional[torch.Tensor],
@@ -618,7 +617,8 @@ class NPUModelRunner(GPUModelRunner):
         uniform_decode = \
             (max_num_scheduled_tokens == self.uniform_decode_query_len) and \
             (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-        moe_comm_type = self._select_moe_comm_method(num_input_tokens)
+        moe_comm_type = select_moe_comm_method(num_input_tokens,
+                                               self.vllm_config)
         ubatch_slices, num_tokens_after_padding = \
             ubatch_split(num_scheduled_tokens,
                          num_tokens_unpadded,
@@ -1606,12 +1606,6 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 self.debugger.start()
 
-        # TODO: check it, it seems that it is useless in tp scenario
-        '''if ubatch_slices:
-            assert num_tokens_after_padding is not None
-            num_input_tokens = int(num_tokens_after_padding[0].item() * 2)
-            self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)'''
-
         uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
             scheduler_output.total_num_scheduled_tokens
             == self.input_batch.num_reqs * max_query_len)
@@ -2040,7 +2034,7 @@ class NPUModelRunner(GPUModelRunner):
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
         ubatch_slices=None,
-    ) -> Optional[dict[str, Any]]:
+    ) -> Optional[PerLayerAttnMetadata]:
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 
@@ -2286,13 +2280,12 @@ class NPUModelRunner(GPUModelRunner):
         # dbo
         total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
         ubatch_slices = None
-        num_tokens_after_padding = None
 
-        moe_comm_type = self._select_moe_comm_method(num_tokens)
+        moe_comm_type = select_moe_comm_method(num_tokens, self.vllm_config)
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         if self.parallel_config.enable_dbo and allow_microbatching:
-            ubatch_slices, ubatch_num_tokens_after_padding = ubatch_split(
+            ubatch_slices, _ = ubatch_split(
                 num_scheduled_tokens,
                 total_num_scheduled_tokens,
                 total_num_scheduled_tokens,
@@ -2312,7 +2305,7 @@ class NPUModelRunner(GPUModelRunner):
         (num_tokens, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._sync_metadata_across_dp(num_tokens, with_prefill,
                                                      enable_dbo)
-        moe_comm_type = self._select_moe_comm_method(num_tokens)
+        moe_comm_type = select_moe_comm_method(num_tokens, self.vllm_config)
         if not enable_dbo:
             ubatch_slices = None
 
