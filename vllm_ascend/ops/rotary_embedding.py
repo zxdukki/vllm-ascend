@@ -157,7 +157,6 @@ def update_cos_sin(positions):
         return
 
     num_tokens = positions.size(0)
-    print("updater cos sin: ", num_tokens, flush=True)
     _cos[:, :num_tokens] = _cos_sin_cache.index_select(0, positions).view(
         num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[0]
     _sin[:, :num_tokens] = _cos_sin_cache.index_select(0, positions).view(
@@ -222,12 +221,6 @@ def _rope_forward_oot(
             else:
                 # Although this function modifies in-place, please retain the function's return value.
                 # Otherwise, the graph fusion operation may fail.
-                print("cos sin : ",
-                      query.shape,
-                      key.shape,
-                      cos.shape,
-                      sin.shape,
-                      flush=True)
                 query, key = torch_npu.npu_apply_rotary_pos_emb(
                     query, key, cos, sin)
         elif self.rotary_dim < self.head_size:

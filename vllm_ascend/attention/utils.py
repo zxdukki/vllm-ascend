@@ -443,7 +443,6 @@ def _make_metadata_with_slice(
         attn_mask=attn_mask,
         spec_attn_mask=attn_metadata.spec_attn_mask,
         attn_state=attn_state,
-        is_only_prefill=attn_metadata.is_only_prefill,
         graph_pad_size=attn_metadata.graph_pad_size,
         decode_token_per_req=attn_metadata.decode_token_per_req,
     )

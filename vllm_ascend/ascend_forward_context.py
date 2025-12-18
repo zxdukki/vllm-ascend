@@ -259,7 +259,7 @@ def create_ascend_forward_context(
         new_forward_context.padded_num_tokens = math.ceil(
             new_forward_context.max_tokens_across_dp /
             tp_world_size) * tp_world_size
-        if cur_forward_context.mc2_mask is not None:
+        if get_mc2_mask() is not None:
             reserved_mc2_mask = torch.zeros(
                 cur_forward_context.mc2_mask.shape,
                 dtype=cur_forward_context.mc2_mask.dtype,
@@ -290,8 +290,9 @@ def create_ascend_forward_context(
             ubatch_slices[ubatch_num].request_slice.stop *
             decode_token_per_req)
         update_cos_sin(positions)
-        new_forward_context.cos, new_forward_context.sin = get_cos_and_sin_slice(
-        )
+        cos_slice, sin_slice = get_cos_and_sin_slice()
+        new_forward_context.cos = cos_slice.clone()
+        new_forward_context.sin = sin_slice.clone()
 
         cos_mla, sin_mla = get_cos_and_sin_mla()
 
