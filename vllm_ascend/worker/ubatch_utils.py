@@ -174,8 +174,6 @@ def create_ubatch_slices(num_scheduled_tokens: np.ndarray, split_point: int, use
                                         len(cu_num_tokens) - 1)
     else:
         # currently split by requests
-        #first_ubatch_req_stop = int(
-        #    np.searchsorted(cu_num_tokens, split_point, side="left"))
         second_ubatch_req_start = int(
             np.searchsorted(cu_num_tokens, split_point, side="right") - 1)
         first_ubatch_req_slice = slice(0, second_ubatch_req_start)
