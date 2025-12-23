@@ -3,12 +3,10 @@
 
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import torch
 
-import vllm.envs as envs
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.distributed.device_communicators.pynccl_allocator import (
@@ -18,9 +16,10 @@ from vllm.forward_context import (get_forward_context,
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-#from vllm.utils import has_deep_gemm
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.v1.worker.gpu_ubatch_wrapper import UbatchMetadata
+from vllm.v1.worker.gpu_ubatch_wrapper import UbatchMetadata, UBatchWrapper
+from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+from vllm_ascend.dbo.utils import select_dbo_templates
 from vllm_ascend.utils import enable_sp, dbo_current_stream
 from vllm_ascend.worker.ubatching import make_ubatch_contexts, dbo_yield
 from vllm_ascend.ascend_forward_context import create_ascend_forward_context
@@ -38,7 +37,7 @@ class AscendUbatchMetadata(UbatchMetadata):
 class AscendNPUGraphMetaData:
     aclgraph: torch.npu.NPUGraph
     ubatch_metadata: AscendUbatchMetadata
-    outputs: Optional[Any] = None
+    outputs: Any | None = None
 
 
 class NPUCoreControlContextManager:
@@ -86,7 +85,7 @@ class NPUCoreControlContextManager:
         torch.npu.reset_stream_limit(self.current_stream)
 
 
-class AscendUBatchWrapper:
+class AscendUBatchWrapper(UBatchWrapper):
 
     def __init__(self, runnable: Callable, vllm_config: VllmConfig,
                  runtime_mode: CUDAGraphMode, device: torch.npu.device):
@@ -102,11 +101,13 @@ class AscendUBatchWrapper:
         self.cudagraph_wrapper = None
         self.graph_pool = None
         if runtime_mode is not CUDAGraphMode.NONE:
-            self.cudagraph_wrapper = CUDAGraphWrapper(
-                runnable, vllm_config, runtime_mode=runtime_mode)
+            self.cudagraph_wrapper = ACLGraphWrapper(runnable,
+                                                     vllm_config,
+                                                     runtime_mode=runtime_mode)
             self.graph_pool = current_platform.get_global_graph_pool()
 
         self.device = device
+        self.overlap_template = None
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -272,6 +273,7 @@ class AscendUBatchWrapper:
 
         forward_contexts = []
         cur_forward_context = get_forward_context()
+        dbo_template = select_dbo_templates(self.vllm_config)
         # Construct forward context list based on the current forward context
         for i, ubatch_slice in enumerate(ubatch_slices):
             forward_contexts.append(
@@ -286,6 +288,7 @@ class AscendUBatchWrapper:
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     ubatch_num=i,
                     positions=positions,
+                    dbo_template=dbo_template,
                 ))
 
         ubatch_ctxs = make_ubatch_contexts(
@@ -397,7 +400,10 @@ class AscendUBatchWrapper:
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
-                compute_stream=compute_stream,
+                # npu graph should be captured in non-default stream
+                #compute_stream=compute_stream,
+                compute_stream=torch.npu.Stream(
+                    device=torch.npu.current_device()),
                 dp_metadata=dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)

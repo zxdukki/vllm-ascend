@@ -48,9 +48,9 @@ from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, maybe_trans_nz, vllm_version_is, weak_ref_tensors
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
-from vllm_ascend.worker.ubatching import (dbo_record_current_stream,
+from vllm_ascend.worker.ubatching import (UBatchEventKey,
+                                          dbo_record_current_stream,
                                           dbo_wait_current_stream_and_yield)
-from vllm_ascend.worker.ubatching import UBatchEventKey
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -1563,22 +1563,27 @@ class AscendMLAImpl(MLAAttentionImpl):
                 0]  # type: ignore[misc]
 
         # Process for Flash Comm V1
-        if get_forward_context().dbo_first_layer_sync:
-            dbo_record_current_stream(event=UBatchEventKey.ATTN_PRE)
-            get_forward_context().dbo_first_layer_sync = False
 
-        if get_forward_context().sp_enabled and need_gather_q_kv:
-            q_c = tensor_model_parallel_all_gather(q_c.contiguous(), 0)
+        forward_context = get_forward_context()
+        if forward_context.dbo_enabled:
+            forward_context.dbo_template.dbo_mla_preprocess_hook(
+                is_record=True)
+            if get_forward_context().sp_enabled:
+                q_c = tensor_model_parallel_all_gather(q_c.contiguous(), 0)
 
-            kv_no_split = tensor_model_parallel_all_gather(
-                kv_no_split.contiguous(), 0)
-
-            dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_PRE)
-        q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c,
-                                                              need_gather_q_kv,
-                                                              do_comm=False)
-        kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            kv_no_split, need_gather_q_kv, do_comm=False)
+                kv_no_split = tensor_model_parallel_all_gather(
+                    kv_no_split.contiguous(), 0)
+            forward_context.dbo_template.dbo_mla_preprocess_hook(
+                is_record=False)
+            q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                q_c, need_gather_q_kv, do_comm=False)
+            kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                kv_no_split, need_gather_q_kv, do_comm=False)
+        else:
+            q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                q_c, need_gather_q_kv)
+            kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                kv_no_split, need_gather_q_kv)
 
         for layer in self.layer_sharding_kwargs or []:
             if is_hidden_layer(layer):

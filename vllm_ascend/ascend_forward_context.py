@@ -130,6 +130,7 @@ def set_ascend_forward_context(
         forward_context.dbo_enabled = False
         # set this for sync dbo in the first layer after embedding
         forward_context.dbo_first_layer_sync = True
+        forward_context.dbo_template = None
 
         # set layer_idx to enable optimization features that depend on this information.
         # This is only applicable to models that contain these necessary attributes.
@@ -199,7 +200,8 @@ def create_ascend_forward_context(
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: BatchDescriptor | None = None,
         reserved_mc2_mask: torch.Tensor | None = None,
-        positions: Any = None):
+        positions: Any = None,
+        dbo_template: Any = None):
 
     new_forward_context = ForwardContext(
         no_compile_layers=vllm_config.compilation_config.
@@ -254,6 +256,7 @@ def create_ascend_forward_context(
     new_forward_context.model_instance = cur_forward_context.model_instance
     new_forward_context.prefetch_mlp_enabled = cur_forward_context.prefetch_mlp_enabled
     new_forward_context.is_mtp_model = cur_forward_context.is_mtp_model
+    new_forward_context.dbo_template = dbo_template
 
     if new_forward_context.num_tokens:
         new_forward_context.padded_num_tokens = math.ceil(
@@ -291,8 +294,10 @@ def create_ascend_forward_context(
             decode_token_per_req)
         update_cos_sin(positions)
         cos_slice, sin_slice = get_cos_and_sin_slice()
-        new_forward_context.cos = cos_slice.clone()
-        new_forward_context.sin = sin_slice.clone()
+        new_forward_context.cos = cos_slice.clone(
+        ) if cos_slice is not None else None
+        new_forward_context.sin = sin_slice.clone(
+        ) if sin_slice is not None else None
 
         cos_mla, sin_mla = get_cos_and_sin_mla()
 

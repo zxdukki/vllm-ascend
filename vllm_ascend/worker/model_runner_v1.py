@@ -2535,10 +2535,12 @@ class NPUModelRunner(GPUModelRunner):
                                          runtime_mode=CUDAGraphMode.FULL)
         elif self.parallel_config.enable_dbo:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                self.update_stream: torch.npu.Stream = torch.npu.Stream()
                 self.model = AscendUBatchWrapper(self.model, self.vllm_config,
                                                  CUDAGraphMode.FULL,
                                                  self.device)
             else:
+                self.update_stream: torch.npu.Stream = torch.npu.Stream()
                 self.model = AscendUBatchWrapper(self.model, self.vllm_config,
                                                  CUDAGraphMode.NONE,
                                                  self.device)
