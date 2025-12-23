@@ -71,7 +71,6 @@ class AscendUBatchContext(UBatchContext):
         self.cpu_wait_event.wait()
         self.cpu_wait_event.clear()
         self._restore_context()
-        forward_context._forward_context.dbo_enabled = True
         # Assume we want to start on the compute stream
         self.update_stream(self.compute_stream)
         return self
@@ -84,9 +83,6 @@ class AscendUBatchContext(UBatchContext):
         self.cpu_signal_event.set()
         self.cpu_wait_event.clear()
         return False
-
-    def _restore_context(self):
-        forward_context._forward_context = self.forward_context
 
     def update_stream(self, stream):
         self.current_stream = stream
@@ -118,12 +114,6 @@ class AscendUBatchContext(UBatchContext):
         self.cpu_wait_event.clear()
         self._restore_context()
 
-    def switch_to_comm(self):
-        self.update_stream(self.comm_stream)
-
-    def switch_to_compute(self):
-        self.update_stream(self.compute_stream)
-
     def switch_to_comm_sync(self, event=UBatchEventKey.DEFAULT):
         self._signal_compute_done(event)
         self.update_stream(self.comm_stream)
@@ -154,11 +144,6 @@ class AscendUBatchContext(UBatchContext):
                                        cube_num=self.comp_cube_core,
                                        vector_num=self.comp_vector_core)
 
-    def maybe_run_recv_hook(self):
-        if self.recv_hook is not None:
-            self.recv_hook()
-            self.recv_hook = None
-
     def yield_(self):
         self.current_stream = dbo_current_stream()
         self._cpu_yield()
@@ -183,16 +168,6 @@ class AscendUBatchContext(UBatchContext):
         assert self.current_stream == self.comm_stream
         self.update_stream(self.compute_stream)
         self._wait_comm_done(event)
-
-
-def dbo_enabled() -> bool:
-    return len(_THREAD_ID_TO_CONTEXT) > 0
-
-
-def dbo_current_ubatch_id() -> int:
-    if len(_THREAD_ID_TO_CONTEXT) == 0:
-        return 0
-    return _THREAD_ID_TO_CONTEXT[threading.get_ident()]
 
 
 def _register_ubatch_function(func):
@@ -226,13 +201,6 @@ dbo_record_current_stream = _register_ubatch_function(
     AscendUBatchContext.record_current_stream)
 dbo_wait_current_stream_and_yield = _register_ubatch_function(
     AscendUBatchContext.wait_current_stream_and_yield)
-
-
-def dbo_register_recv_hook(recv_hook):
-    if len(_THREAD_ID_TO_CONTEXT) > 0:
-        ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
-        next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % 2]
-        next_ctx.recv_hook = recv_hook
 
 
 def dbo_get_previous_event(func, *args, **kwargs):
