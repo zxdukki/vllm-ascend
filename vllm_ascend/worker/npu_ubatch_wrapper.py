@@ -21,6 +21,7 @@ from vllm.sequence import IntermediateTensors
 #from vllm.utils import has_deep_gemm
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.v1.worker.gpu_ubatch_wrapper import UbatchMetadata
+from vllm_ascend.dbo.utils import select_dbo_templates
 from vllm_ascend.utils import enable_sp, dbo_current_stream
 from vllm_ascend.worker.ubatching import make_ubatch_contexts, dbo_yield
 from vllm_ascend.ascend_forward_context import create_ascend_forward_context
@@ -107,6 +108,7 @@ class AscendUBatchWrapper:
             self.graph_pool = current_platform.get_global_graph_pool()
 
         self.device = device
+        self.overlap_template = None
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -272,6 +274,7 @@ class AscendUBatchWrapper:
 
         forward_contexts = []
         cur_forward_context = get_forward_context()
+        dbo_template = select_dbo_templates(self.vllm_config)
         # Construct forward context list based on the current forward context
         for i, ubatch_slice in enumerate(ubatch_slices):
             forward_contexts.append(
@@ -286,6 +289,7 @@ class AscendUBatchWrapper:
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     ubatch_num=i,
                     positions=positions,
+                    dbo_template=dbo_template,
                 ))
 
         ubatch_ctxs = make_ubatch_contexts(
