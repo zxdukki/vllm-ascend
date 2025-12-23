@@ -2044,7 +2044,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: np.ndarray,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
-        ubatch_slices=None,
+        ubatch_slices: UBatchSlices | None = None,
     ) -> Optional[PerLayerAttnMetadata]:
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
@@ -2136,7 +2136,6 @@ class NPUModelRunner(GPUModelRunner):
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     builder = attn_group.get_metadata_builder()
                     if ubatch_slices is not None:
-                        # TODO: check dummy attn construct logic
                         common_attn_metadata_list = split_attn_metadata(
                             ubatch_slices, common_attn_metadata,
                             self.max_num_tokens)
@@ -2537,10 +2536,12 @@ class NPUModelRunner(GPUModelRunner):
                                          runtime_mode=CUDAGraphMode.FULL)
         elif self.parallel_config.enable_dbo:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                self.update_stream: torch.npu.Stream = torch.npu.Stream()
                 self.model = AscendUBatchWrapper(self.model, self.vllm_config,
                                                  CUDAGraphMode.FULL,
                                                  self.device)
             else:
+                self.update_stream: torch.npu.Stream = torch.npu.Stream()
                 self.model = AscendUBatchWrapper(self.model, self.vllm_config,
                                                  CUDAGraphMode.NONE,
                                                  self.device)
