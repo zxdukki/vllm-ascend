@@ -395,6 +395,7 @@ def _make_metadata_with_slice(
         seq_lens[-1] -= tokens_skipped
         seq_lens_cpu[-1] -= tokens_skipped
 
+    max_seq_len = int(seq_lens_cpu.max())
     num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
         request_slice]
 
@@ -440,6 +441,7 @@ def _make_metadata_with_slice(
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         positions=positions,
+        max_seq_len=max_seq_len,
         attn_mask=attn_mask,
         spec_attn_mask=attn_metadata.spec_attn_mask,
         attn_state=attn_state,

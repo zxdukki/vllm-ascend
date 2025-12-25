@@ -246,7 +246,6 @@ def create_ascend_forward_context(
     # set for different microbatches
     new_forward_context.moe_comm_method = get_moe_comm_method(
         new_forward_context.moe_comm_type, ubatch_num)
-    new_forward_context.with_prefill = cur_forward_context.with_prefill
     new_forward_context.in_profile_run = cur_forward_context.in_profile_run
     new_forward_context.capturing = cur_forward_context.capturing
     new_forward_context.mmrs_fusion = cur_forward_context.mmrs_fusion
