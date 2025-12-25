@@ -46,7 +46,7 @@ from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
                                              get_pcp_group, get_pp_group,
                                              get_tp_group,
                                              is_global_first_rank)
-from vllm.forward_context import BatchDescriptor, get_forward_context, DPMetadata
+from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -117,7 +117,7 @@ from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.npu_ubatch_wrapper import AscendUBatchWrapper
-from vllm_ascend.worker.ubatch_utils import ubatch_split
+from vllm_ascend.worker.ubatch_utils import maybe_create_ubatch_slices, check_enable_ubatch
 from vllm_ascend.attention.utils import split_attn_metadata
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
@@ -476,14 +476,14 @@ class NPUModelRunner(GPUModelRunner):
         # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
         # immediately once the other two flags are no longer needed.
         if self.dp_size == 1:
-            return num_tokens, None, with_prefill, enable_dbo
+            return num_tokens, None, with_prefill
 
         if self._skip_all_reduce_across_dp_group(is_draft_model):
             num_tokens_after_padding = torch.tensor([num_tokens] *
                                                     self.dp_size,
                                                     device="cpu",
                                                     dtype=torch.int32)
-            return num_tokens, num_tokens_after_padding, with_prefill, enable_dbo
+            return num_tokens, num_tokens_after_padding, with_prefill
 
         # Sync num_tokens, with_prefill across dp ranks
         num_tokens_tensor = torch.tensor([
@@ -492,10 +492,9 @@ class NPUModelRunner(GPUModelRunner):
                                          dtype=torch.int32,
                                          device="cpu")
 
-        flags_tensor = torch.tensor(
-            [int(with_prefill), int(enable_dbo)],
-            dtype=torch.int32,
-            device="cpu")
+        flags_tensor = torch.tensor([int(with_prefill)],
+                                    dtype=torch.int32,
+                                    device="cpu")
 
         packed_tensor = torch.cat([num_tokens_tensor, flags_tensor])
         # use cpu_group to avoid cpu synchronization issue.
@@ -503,14 +502,11 @@ class NPUModelRunner(GPUModelRunner):
         dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
 
         # Unpack the results
-        num_tokens_across_dp = packed_tensor[:-2]
-        synced_flags = packed_tensor[-2:]
+        num_tokens_across_dp = packed_tensor[:-1]
+        synced_flags = packed_tensor[-1:]
 
         max_tokens_across_dp = torch.max(num_tokens_across_dp).item()
         global_with_prefill = bool(synced_flags[0])
-        # all the ranks should execute dummy run at the same time
-        global_enable_dbo = (synced_flags[1] == get_dp_group().world_size
-                             or synced_flags[1] == 0)
 
         # Create a tensor for num_tokens_after_padding
         num_tokens_after_padding = torch.tensor([max_tokens_across_dp] *
@@ -518,7 +514,34 @@ class NPUModelRunner(GPUModelRunner):
                                                 device="cpu",
                                                 dtype=torch.int32)
 
-        return max_tokens_across_dp, num_tokens_after_padding, global_with_prefill, global_enable_dbo
+        return max_tokens_across_dp, num_tokens_after_padding, global_with_prefill
+
+    def _sync_enable_dbo_across_dp(self, enable_dbo: bool) -> bool:
+        # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
+        # our case, we still need to sync the other two flags as well. So we need to
+        # include them in the all_reduce operation, and more over, we CANNOT skip it
+        # even if we are running in eager mode, which harms performance.
+        # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
+        # immediately once the other two flags are no longer needed.
+        if self.dp_size == 1:
+            return enable_dbo
+
+        # Sync enable_dbo across dp ranks
+
+        flags_tensor = torch.tensor([int(enable_dbo)],
+                                    dtype=torch.int32,
+                                    device="cpu")
+
+        # use cpu_group to avoid cpu synchronization issue.
+        # it can be overlapped with main moell execution on npu.
+        dist.all_reduce(flags_tensor, group=get_dp_group().cpu_group)
+
+        # Unpack the results
+        enable_dbo_sum = flags_tensor[0]
+        # all the ranks should execute dummy run at the same time
+        global_enable_dbo = enable_dbo_sum == get_dp_group().world_size
+
+        return global_enable_dbo
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -2401,6 +2424,11 @@ class NPUModelRunner(GPUModelRunner):
                     return self.drafter.model.compute_logits(
                         hidden_states[dummy_indices])
 
+            if ubatch_slices is not None:
+                num_tokens_padded = ubatch_slices[0].num_tokens
+                if num_tokens_across_dp is not None:
+                    num_tokens_across_dp[:] = num_tokens_padded
+
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -2410,7 +2438,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_actual_tokens=num_tokens_padded,
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
-                    model_instance=self.model):
+                    model_instance=self.model,
+                    ubatch_slices=ubatch_slices):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions,
                     intermediate_tensors, inputs_embeds)

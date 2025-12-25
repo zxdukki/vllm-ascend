@@ -33,9 +33,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
 from vllm_ascend.utils import (enable_sp, npu_stream_switch,
                                prefill_context_parallel_enable)
-from vllm_ascend.worker.ubatching import (dbo_record_current_stream,
-                                          dbo_wait_current_stream_and_yield,
-                                          UBatchEventKey)
 
 
 class QuantType(Enum):
@@ -376,7 +373,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                     pertoken_scale, True, True)
         else:
-
             forward_context = get_forward_context()
             if forward_context.dbo_enabled:
                 forward_context.dbo_template.dbo_moe_prepare_hook(

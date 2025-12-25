@@ -213,9 +213,12 @@ def create_ascend_forward_context(
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices)
 
-    attn_metadata_i = next(iter(attn_metadata.values()))
     new_forward_context.sp_enabled = cur_forward_context.sp_enabled
-    new_forward_context.num_tokens = attn_metadata_i.num_actual_tokens
+    if attn_metadata is not None:
+        attn_metadata_i = next(iter(attn_metadata.values()))
+        new_forward_context.num_tokens = attn_metadata_i.num_actual_tokens
+    elif ubatch_slices and ubatch_slices[ubatch_num]:
+        new_forward_context.num_tokens = ubatch_slices[ubatch_num].num_tokens
     tp_world_size = get_tensor_model_parallel_world_size()
     dp_world_size = get_dp_group().world_size
 

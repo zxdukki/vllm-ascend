@@ -10,7 +10,6 @@ def select_dbo_templates(vllm_config):
     model_config = vllm_config.model_config
     architectures = getattr(model_config.hf_config, "architectures", [])
 
-    print("architectures: ", architectures, flush=True)
     soc_version = get_ascend_device_type()
     if "DeepseekV2ForCausalLM" in architectures or "DeepseekV3ForCausalLM" in architectures:
         if soc_version in {AscendDeviceType.A3}:

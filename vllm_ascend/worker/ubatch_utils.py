@@ -149,14 +149,14 @@ def get_dp_padding_ubatch(
                                             dtype=torch.int32)
     return should_ubatch, num_tokens_after_padding
 
-def create_ubatch_slices(num_scheduled_tokens: np.ndarray, split_point: int, use_mla: bool) \
+def create_ubatch_slices(num_scheduled_tokens: np.ndarray, split_point: int, request_level_split: bool = False) \
     -> UBatchSlices:
     # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
     # in cu_num_tokens directly (i.e. query_start_loc)
     cu_num_tokens = np.zeros(len(num_scheduled_tokens) + 1, dtype=np.int32)
     np.cumsum(num_scheduled_tokens, dtype=np.int32, out=cu_num_tokens[1:])
 
-    if use_mla:
+    if not request_level_split:
         first_ubatch_token_slice = slice(0, split_point)
         second_ubatch_token_slice = slice(split_point, cu_num_tokens[-1])
 
@@ -190,15 +190,73 @@ def create_ubatch_slices(num_scheduled_tokens: np.ndarray, split_point: int, use
     ]
 
 
-def ubatch_split(
+def check_enable_ubatch(num_scheduled_tokens_per_request: np.ndarray,
+                        num_tokens_unpadded: int,
+                        uniform_decode: bool,
+                        vllm_config: VllmConfig,
+                        moe_comm_type: Optional[MoECommType],
+                        request_level_split: bool = False) -> bool:
+    parallel_config = vllm_config.parallel_config
+    # Check preconditions for microbatching
+    should_attempt_ubatching = check_ubatch_thresholds(
+        parallel_config,
+        num_tokens_unpadded,
+        uniform_decode=uniform_decode,
+    )
+
+    if not parallel_config.enable_dbo or not should_attempt_ubatching or moe_comm_type == MoECommType.MC2:
+        return False
+
+    # check second batch
+    num_tokens_padded = round_up(num_tokens_unpadded, 2)
+
+    # Sanity Check that the existing padding isn't giving us an empty second
+    # ubatch. Abort if so
+    if is_second_ubatch_empty(num_tokens_unpadded, num_tokens_padded):
+        logger.debug(
+            "Empty second µbatch detected: unpadded tokens: %s, padded "
+            "tokens: %s", num_tokens_unpadded, num_tokens_padded)
+        return False
+
+    dp_size = vllm_config.parallel_config.data_parallel_size
+    if dp_size == 1:
+        token_split_point = int(num_tokens_unpadded) // 2
+    else:
+        token_split_point = int(num_tokens_padded) // 2
+
+    total_tokens = int(num_scheduled_tokens_per_request.sum())
+    if token_split_point >= total_tokens:
+        return False
+    if request_level_split:
+        # using request-level splitting
+        cu_num_tokens = np.zeros(len(num_scheduled_tokens_per_request) + 1,
+                                 dtype=np.int32)
+        np.cumsum(num_scheduled_tokens_per_request,
+                  dtype=np.int32,
+                  out=cu_num_tokens[1:])
+
+        request_split_point = int(
+            np.searchsorted(cu_num_tokens, token_split_point, side="right") -
+            1)
+        imbalance_ratio = (
+            token_split_point -
+            cu_num_tokens[request_split_point]) / cu_num_tokens[-1]
+        if len(num_scheduled_tokens_per_request) == 1 or imbalance_ratio > 0.5:
+            return False
+        # first/second batch should not be empty
+        if request_split_point == 0 or request_split_point == len(
+                cu_num_tokens) - 1:
+            return False
+
+    return True
+
+
+def maybe_create_ubatch_slices(
     num_scheduled_tokens_per_request: np.ndarray,
     num_tokens_unpadded: int,
-    num_tokens_padded: int,
-    uniform_decode: bool,
     vllm_config: VllmConfig,
-    moe_comm_type: Optional[MoECommType],
-    use_mla: bool = True,
-) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
+    request_level_split: bool = False,
+) -> Optional[UBatchSlices]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
@@ -212,56 +270,19 @@ def ubatch_split(
     ]
 
     """
-    parallel_config = vllm_config.parallel_config
-    # Don't bother with the should_ubatch handshaking unless microbatching
-    # is enabled
-    if not parallel_config.enable_dbo:
-        return (None, None)
 
-    # Check preconditions for microbatching
-    should_attempt_ubatching = check_ubatch_thresholds(
-        parallel_config,
-        num_tokens_unpadded,
-        uniform_decode=uniform_decode,
-    )
+    num_tokens_padded = round_up(num_tokens_unpadded, 2)
 
-    # Don't microbatch unless every other DP worker is also microbatching
-    should_ubatch, num_tokens_after_padding = get_dp_padding_ubatch(
-        num_tokens_unpadded,
-        num_tokens_padded,
-        should_attempt_ubatching,
-        vllm_config,
-    )
-
-    if not should_ubatch or moe_comm_type == MoECommType.MC2:
-        return (None, None)
-
-    # This doesn't actually pad the ubatch slices. It just initializes the
-    # split point to the padded value so that padding can be applied
-    # to the second ubatch in pad_out_ubatch_slice after attention
-    # metadata creation
-    assert num_tokens_after_padding is not None
-    token_split_point = int(num_tokens_after_padding[0].item())
-
-    if not use_mla:
-        cu_num_tokens = np.zeros(len(num_scheduled_tokens_per_request) + 1,
-                                 dtype=np.int32)
-        np.cumsum(num_scheduled_tokens_per_request,
-                  dtype=np.int32,
-                  out=cu_num_tokens[1:])
-
-        split_point = int(
-            np.searchsorted(cu_num_tokens, token_split_point, side="right") -
-            1)
-        imbalance_ratio = (token_split_point -
-                           cu_num_tokens[split_point]) / cu_num_tokens[-1]
-        if len(num_scheduled_tokens_per_request) == 1 or imbalance_ratio > 0.5:
-            return (None, None)
+    dp_size = vllm_config.parallel_config.data_parallel_size
+    if dp_size == 1:
+        token_split_point = int(num_tokens_unpadded) // 2
+    else:
+        token_split_point = int(num_tokens_padded) // 2
 
     ubatch_slices = create_ubatch_slices(num_scheduled_tokens_per_request,
-                                         token_split_point, use_mla)
-
-    return (ubatch_slices, num_tokens_after_padding)
+                                         token_split_point,
+                                         request_level_split)
+    return ubatch_slices
 
 
 def create_core_control_context(aic_core: int, aiv_core: int):
