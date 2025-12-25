@@ -11,7 +11,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id)
-from vllm.forward_context import (get_forward_context,
+from vllm.forward_context import (DPMetadata, get_forward_context,
                                   override_forward_context)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -387,9 +387,24 @@ class AscendUBatchWrapper(UBatchWrapper):
         compute_stream = torch.npu.current_stream()
 
         dp_metadata = forward_context.dp_metadata
-
         # We shouldn't be here unless we are running with multiple DP ranks
         # assert dp_metadata is not None
+
+        num_tokens_per_ubatch = (ubatch_slices[0].token_slice.stop -
+                                 ubatch_slices[0].token_slice.start)
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        if dp_size > 1:
+            ubatch_num_tokens_across_dp = torch.tensor(
+                [num_tokens_per_ubatch] * dp_size,
+                device="cpu",
+                dtype=torch.int32)
+            ubatch_dp_metadata = DPMetadata.make(
+                self.vllm_config.parallel_config,
+                num_tokens_per_ubatch,
+                ubatch_num_tokens_across_dp,
+            )
+        else:
+            ubatch_dp_metadata = None
 
         if num_tokens not in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
@@ -404,7 +419,8 @@ class AscendUBatchWrapper(UBatchWrapper):
                 #compute_stream=compute_stream,
                 compute_stream=torch.npu.Stream(
                     device=torch.npu.current_device()),
-                dp_metadata=dp_metadata,
+                # after padding for cudagraph
+                dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
             return self._capture_ubatches(ubatch_metadata, self.model)
