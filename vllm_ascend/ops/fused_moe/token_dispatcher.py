@@ -34,9 +34,6 @@ from vllm_ascend.ops.fused_moe.comm_utils import (
     async_all_to_all, gather_from_sequence_parallel_region)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                is_hierarchical_communication_enabled)
-from vllm_ascend.worker.ubatching import (dbo_record_current_stream,
-                                          dbo_wait_current_stream_and_yield,
-                                          UBatchEventKey)
 
 
 class MoETokenDispatcher(ABC):
@@ -640,8 +637,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
 
         global_input_tokens_local_experts_indices = None
 
-        dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_POST,
-                                          wait=False)
         if self.num_local_experts > 1:
             if num_global_tokens_per_local_expert is None:
                 raise ValueError(
