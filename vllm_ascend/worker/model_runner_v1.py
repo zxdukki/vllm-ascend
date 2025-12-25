@@ -886,6 +886,8 @@ class NPUModelRunner(GPUModelRunner):
                     intermediate_tensor_size = next(
                         iter(self.intermediate_tensors.tensors.values())).size(
                             0)
+                    # TODO(zxdu): the size of dbo intermediate tensors in the
+                    # first rank after merging may exceed the max_batched_tokens
                     if intermediate_tensor_size < num_input_tokens_with_dbo:
                         self.intermediate_tensors = (
                             self.model.make_empty_intermediate_tensors(
@@ -1106,6 +1108,50 @@ class NPUModelRunner(GPUModelRunner):
                 self.long_seq_metadata.max_query_len_pcp_full = \
                     ori_query_lens_cpu.max().item()
 
+            def _build_attn_group_metadata(
+                kv_cache_gid: int,
+                attn_gid: int,
+                common_attn_metadata: CommonAttentionMetadata,
+                ubid: int | None = None,
+            ) -> None:
+                common_prefix_len = 0
+                attn_group = self.attn_groups[kv_cache_gid][attn_gid]
+                builder = attn_group.get_metadata_builder(ubid or 0)
+                extra_attn_metadata_args = {}
+                if use_spec_decode and isinstance(builder,
+                                                  GDNAttentionMetadataBuilder):
+                    assert ubid is None, "UBatching not supported with GDN yet"
+                    patch_torch_npu_argsort()
+                    extra_attn_metadata_args = dict(
+                        num_accepted_tokens=self.num_accepted_tokens.
+                        gpu[:num_reqs],
+                        num_decode_draft_tokens_cpu=self.
+                        num_decode_draft_tokens.cpu[:num_reqs],
+                    )
+                if (use_spec_decode
+                        and isinstance(builder, GDNAttentionMetadataBuilder)
+                    ) or self.model_config.runner_type == "pooling":
+                    attn_metadata_i = builder.build(
+                        common_prefix_len=common_prefix_len,
+                        common_attn_metadata=common_attn_metadata,
+                        **extra_attn_metadata_args,
+                    )
+                else:
+                    attn_metadata_i = builder.build(
+                        common_prefix_len=common_prefix_len,
+                        common_attn_metadata=common_attn_metadata,
+                        model=self.get_model(),
+                        **extra_attn_metadata_args)
+
+                if ubid is None:
+                    assert isinstance(attn_metadata, dict)
+                    attn_metadata_dict = attn_metadata
+                else:
+                    assert isinstance(attn_metadata, list)
+                    attn_metadata_dict = attn_metadata[ubid]
+
+                for layer_name in attn_group.layer_names:
+                    attn_metadata_dict[layer_name] = attn_metadata_i
 
 
             if self.speculative_config and \
@@ -1116,77 +1162,16 @@ class NPUModelRunner(GPUModelRunner):
                         self.spec_decode_common_attn_metadata.unpadded(
                             total_num_scheduled_tokens, base_num_reqs)
 
-            for attn_group in self.attn_groups[kv_cache_group_id]:
-                common_prefix_len = 0
-                extra_attn_metadata_args = {}
-                builder = attn_group.get_metadata_builder()
-                if isinstance(builder, GDNAttentionMetadataBuilder):
-                    if use_spec_decode:
-                        patch_torch_npu_argsort()
-                        extra_attn_metadata_args = dict(
-                            num_accepted_tokens=self.num_accepted_tokens.
-                            gpu[:num_reqs],
-                            num_decode_draft_tokens_cpu=self.
-                            num_decode_draft_tokens.cpu[:num_reqs],
-                        )
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args)
-
-                    if ubatch_slices is not None:
-                        common_attn_metadata_list = split_attn_metadata(
-                            ubatch_slices, common_attn_metadata,
-                            self.max_num_tokens)
-                        for ubid, common_attn_metadata in enumerate(
-                                common_attn_metadata_list):
-                            attn_metadata_i = (attn_group.get_metadata_builder(
-                                ubatch_id=ubid).build(
-                                    common_prefix_len=common_prefix_len,
-                                    common_attn_metadata=common_attn_metadata,
-                                ))
-                            for layer_name in kv_cache_group_spec.layer_names:
-                                assert type(attn_metadata) is list
-                                attn_metadata[ubid][
-                                    layer_name] = attn_metadata_i
-                    else:
-                        attn_metadata_i = builder.build(
-                            common_prefix_len=common_prefix_len,
-                            common_attn_metadata=common_attn_metadata,
-                            **extra_attn_metadata_args)
-
-                        for layer_name in attn_group.layer_names:
-                            attn_metadata[layer_name] = attn_metadata_i
-                elif self.model_config.runner_type == "pooling":
-                    # TODO: support ubatch here
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args)
+            for attn_gid in range(len(self.attn_groups[kv_cache_group_id])):
+                if ubatch_slices is not None:
+                    for ubid, _cm in enumerate(
+                            split_attn_metadata(ubatch_slices,
+                                                common_attn_metadata)):
+                        _build_attn_group_metadata(kv_cache_group_id, attn_gid,
+                                                   _cm, ubid)
                 else:
-                    if ubatch_slices is not None:
-                        common_attn_metadata_list = split_attn_metadata(
-                            ubatch_slices, common_attn_metadata,
-                            self.max_num_tokens)
-                        for ubid, common_attn_metadata in enumerate(
-                                common_attn_metadata_list):
-                            attn_metadata_i = (attn_group.get_metadata_builder(
-                                ubatch_id=ubid).build(
-                                    common_prefix_len=common_prefix_len,
-                                    common_attn_metadata=common_attn_metadata,
-                                    model=self.get_model()))
-                            for layer_name in kv_cache_group_spec.layer_names:
-                                assert type(attn_metadata) is list
-                                attn_metadata[ubid][
-                                    layer_name] = attn_metadata_i
-                    else:
-                        attn_metadata_i = builder.build(
-                            common_prefix_len=common_prefix_len,
-                            common_attn_metadata=common_attn_metadata,
-                            model=self.get_model(),
-                            **extra_attn_metadata_args)
-                        for layer_name in attn_group.layer_names:
-                            attn_metadata[layer_name] = attn_metadata_i
+                    _build_attn_group_metadata(kv_cache_group_id, attn_gid,
+                                               common_attn_metadata)
 
         # update global cos, sin
         update_cos_sin(positions)
