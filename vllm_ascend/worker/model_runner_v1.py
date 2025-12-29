@@ -1235,7 +1235,6 @@ class NPUModelRunner(GPUModelRunner):
                     attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
                         common_attn_metadata=common_attn_metadata,
-                        model=self.get_model(),
                         **extra_attn_metadata_args)
 
                 if ubid is None:
