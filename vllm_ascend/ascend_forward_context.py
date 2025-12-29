@@ -257,7 +257,7 @@ def create_ascend_forward_context(
     new_forward_context.layer_idx = cur_forward_context.layer_idx
     new_forward_context.model_instance = cur_forward_context.model_instance
     new_forward_context.prefetch_mlp_enabled = cur_forward_context.prefetch_mlp_enabled
-    new_forward_context.is_mtp_model = cur_forward_context.is_mtp_model
+    new_forward_context.is_draft_model = cur_forward_context.is_draft_model
     new_forward_context.dbo_template = dbo_template
 
     if new_forward_context.num_tokens:
@@ -301,7 +301,7 @@ def create_ascend_forward_context(
         new_forward_context.sin = sin_slice.clone(
         ) if sin_slice is not None else None
 
-        cos_mla, sin_mla = get_cos_and_sin_mla()
+        cos_mla, sin_mla = get_cos_and_sin_mla(positions)
 
         new_forward_context.cos_mla = cos_mla[
             mla_slice] if cos_mla is not None else None

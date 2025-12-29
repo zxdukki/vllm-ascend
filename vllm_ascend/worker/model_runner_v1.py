@@ -2535,23 +2535,24 @@ class NPUModelRunner(GPUModelRunner):
                     m.consumed_memory / float(2**30))
 
         # wrap the model with full graph wrapper if needed.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs(
-        ) and not self.parallel_config.enable_dbo:
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            self.model = ACLGraphWrapper(self.model,
-                                         self.vllm_config,
-                                         runtime_mode=CUDAGraphMode.FULL)
-        elif self.parallel_config.enable_dbo:
-            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-                self.update_stream: torch.npu.Stream = torch.npu.Stream()
-                self.model = AscendUBatchWrapper(self.model, self.vllm_config,
-                                                 CUDAGraphMode.FULL,
-                                                 self.device)
+            if not self.parallel_config.enable_dbo:
+                self.model = ACLGraphWrapper(self.model,
+                                             self.vllm_config,
+                                             runtime_mode=CUDAGraphMode.FULL)
             else:
-                self.update_stream: torch.npu.Stream = torch.npu.Stream()
-                self.model = AscendUBatchWrapper(self.model, self.vllm_config,
-                                                 CUDAGraphMode.NONE,
-                                                 self.device)
+                if self.compilation_config.cudagraph_mode.has_full_cudagraphs(
+                ):
+                    self.model = AscendUBatchWrapper(self.model,
+                                                     self.vllm_config,
+                                                     CUDAGraphMode.FULL,
+                                                     self.device)
+                else:
+                    self.model = AscendUBatchWrapper(self.model,
+                                                     self.vllm_config,
+                                                     CUDAGraphMode.NONE,
+                                                     self.device)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
