@@ -1,4 +1,5 @@
 from vllm.forward_context import get_forward_context
+
 from vllm_ascend.dbo.overlap_templates.base import UbatchOverlapBaseTemplate
 from vllm_ascend.worker.ubatching import (UBatchEventKey,
                                           dbo_record_current_stream,

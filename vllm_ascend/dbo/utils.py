@@ -1,7 +1,10 @@
 from vllm_ascend.dbo.overlap_templates.base import UbatchOverlapBaseTemplate
-from vllm_ascend.dbo.overlap_templates.deepseek import DeepseekAllgatherTemplate, DeepseekAlltoallTemplate
-from vllm_ascend.dbo.overlap_templates.qwen3_moe import QwenMoEAllgatherTemplate, QwenMoEAlltoallTemplate
-from vllm_ascend.dbo.overlap_templates.qwen3_dense import QwenDenseAllgatherTemplate, QwenDenseAlltoallTemplate
+from vllm_ascend.dbo.overlap_templates.deepseek import (
+    DeepseekAllgatherTemplate, DeepseekAlltoallTemplate)
+from vllm_ascend.dbo.overlap_templates.qwen3_dense import (
+    QwenDenseAllgatherTemplate, QwenDenseAlltoallTemplate)
+from vllm_ascend.dbo.overlap_templates.qwen3_moe import (
+    QwenMoEAllgatherTemplate, QwenMoEAlltoallTemplate)
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
