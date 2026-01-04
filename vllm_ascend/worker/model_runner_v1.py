@@ -24,15 +24,15 @@ from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Dict, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from tqdm import tqdm  # type: ignore
 from typing_extensions import TypeAlias
-from vllm.attention.backends.abstract import AttentionBackend, AttentionType, AttentionMetadata
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
@@ -43,8 +43,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
                                              get_pcp_group, get_pp_group,
-                                             get_tp_group,
-                                             is_global_first_rank)
+                                             get_tp_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -77,16 +76,13 @@ from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
                                              GPUModelRunner)
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
+from vllm.v1.worker.ubatch_utils import UBatchSlices
 from vllm.v1.worker.utils import AttentionGroup
-from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds
-from vllm.v1.worker.utils import (AttentionGroup, gather_mm_placeholders,
-                                  sanity_check_mm_encoder_outputs,
-                                  scatter_mm_placeholders)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         split_attn_metadata)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
@@ -114,11 +110,10 @@ from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                lmhead_tp_enable, maybe_trans_nz,
                                set_weight_prefetch_method, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.npu_ubatch_wrapper import AscendUBatchWrapper
-from vllm_ascend.worker.ubatch_utils import maybe_create_ubatch_slices, check_enable_ubatch
-from vllm_ascend.attention.utils import split_attn_metadata
-from vllm.v1.worker.ubatch_utils import UBatchSlices
+from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.worker.ubatch_utils import (check_enable_ubatch,
+                                             maybe_create_ubatch_slices)
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType, get_mc2_tokens_capacity, select_moe_comm_method,
@@ -2165,8 +2160,7 @@ class NPUModelRunner(GPUModelRunner):
                                 common_metadata)
                         else:
                             attn_metadata_full_attention = builder.build_for_graph_capture(
-                                common_attn_metadata, attn_state,
-                                self.get_model())
+                                common_attn_metadata, attn_state)
                         for layer_name in kv_cache_group_spec.layer_names:
                             if "linear_attn" in layer_name:
                                 attn_metadata[
@@ -2275,7 +2269,6 @@ class NPUModelRunner(GPUModelRunner):
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.max_num_reqs
-        # TODO: create_mixed_batch should be Fasle in Ascend now
         if uniform_decode:
             num_reqs = cdiv(num_tokens, max_query_len)
             num_scheduled_tokens_list = [max_query_len] * num_reqs
@@ -2542,17 +2535,12 @@ class NPUModelRunner(GPUModelRunner):
                                              self.vllm_config,
                                              runtime_mode=CUDAGraphMode.FULL)
             else:
-                if self.compilation_config.cudagraph_mode.has_full_cudagraphs(
-                ):
-                    self.model = AscendUBatchWrapper(self.model,
-                                                     self.vllm_config,
-                                                     CUDAGraphMode.FULL,
-                                                     self.device)
-                else:
-                    self.model = AscendUBatchWrapper(self.model,
-                                                     self.vllm_config,
-                                                     CUDAGraphMode.NONE,
-                                                     self.device)
+                self.model = AscendUBatchWrapper(self.model, self.vllm_config,
+                                                 CUDAGraphMode.FULL,
+                                                 self.device)
+        elif self.parallel_config.enable_dbo:
+            self.model = AscendUBatchWrapper(self.model, self.vllm_config,
+                                             CUDAGraphMode.NONE, self.device)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """

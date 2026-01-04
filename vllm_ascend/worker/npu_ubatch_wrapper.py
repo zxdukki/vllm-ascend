@@ -6,23 +6,24 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import torch
-
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
-from vllm.distributed.device_communicators.pynccl_allocator import (
-    set_graph_pool_id)
+from vllm.distributed import (get_pp_group,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
+from vllm.distributed.device_communicators.pynccl_allocator import \
+    set_graph_pool_id
 from vllm.forward_context import (DPMetadata, get_forward_context,
                                   override_forward_context)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.v1.worker.gpu_ubatch_wrapper import UbatchMetadata, UBatchWrapper
+
+from vllm_ascend.ascend_forward_context import create_ascend_forward_context
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.dbo.utils import select_dbo_templates
-from vllm_ascend.utils import enable_sp, dbo_current_stream
-from vllm_ascend.worker.ubatching import make_ubatch_contexts, dbo_yield
-from vllm_ascend.ascend_forward_context import create_ascend_forward_context
+from vllm_ascend.utils import dbo_current_stream, enable_sp
+from vllm_ascend.worker.ubatching import dbo_yield, make_ubatch_contexts
 
 logger = init_logger(__name__)
 
