@@ -30,9 +30,9 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from tqdm import tqdm  # type: ignore
 from typing_extensions import TypeAlias
-from vllm.attention.backends.abstract import AttentionBackend, AttentionType, AttentionMetadata
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
@@ -79,16 +79,12 @@ from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
                                              GPUModelRunner)
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
+from vllm.v1.worker.ubatch_utils import UBatchSlices
 from vllm.v1.worker.utils import AttentionGroup
-from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds
-from vllm.v1.worker.utils import (AttentionGroup, gather_mm_placeholders,
-                                  sanity_check_mm_encoder_outputs,
-                                  scatter_mm_placeholders)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_attn_metadata, using_paged_attention
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
@@ -115,11 +111,10 @@ from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                lmhead_tp_enable, maybe_trans_nz,
                                set_weight_prefetch_method, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.npu_ubatch_wrapper import AscendUBatchWrapper
-from vllm_ascend.worker.ubatch_utils import maybe_create_ubatch_slices, check_enable_ubatch
-from vllm_ascend.attention.utils import split_attn_metadata
-from vllm.v1.worker.ubatch_utils import UBatchSlices
+from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.worker.ubatch_utils import (check_enable_ubatch,
+                                             maybe_create_ubatch_slices)
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType, get_mc2_tokens_capacity, select_moe_comm_method,
@@ -2542,17 +2537,12 @@ class NPUModelRunner(GPUModelRunner):
                                              self.vllm_config,
                                              runtime_mode=CUDAGraphMode.FULL)
             else:
-                if self.compilation_config.cudagraph_mode.has_full_cudagraphs(
-                ):
-                    self.model = AscendUBatchWrapper(self.model,
-                                                     self.vllm_config,
-                                                     CUDAGraphMode.FULL,
-                                                     self.device)
-                else:
-                    self.model = AscendUBatchWrapper(self.model,
-                                                     self.vllm_config,
-                                                     CUDAGraphMode.NONE,
-                                                     self.device)
+                self.model = AscendUBatchWrapper(self.model, self.vllm_config,
+                                                 CUDAGraphMode.FULL,
+                                                 self.device)
+        elif self.parallel_config.enable_dbo:
+            self.model = AscendUBatchWrapper(self.model, self.vllm_config,
+                                             CUDAGraphMode.NONE, self.device)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """

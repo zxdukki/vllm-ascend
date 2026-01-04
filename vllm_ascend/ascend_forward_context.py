@@ -6,7 +6,7 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
-from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context, DPMetadata, ForwardContext
+from vllm.forward_context import BatchDescriptor, DPMetadata, ForwardContext, get_forward_context, set_forward_context
 
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
@@ -244,8 +244,8 @@ def create_ascend_forward_context(
     new_forward_context.max_tokens_across_dp = max_tokens_across_dp
 
     new_forward_context.moe_comm_type = cur_forward_context.moe_comm_type
-    from vllm_ascend.ops.fused_moe.moe_comm_method import \
-        get_moe_comm_method
+    from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
+
     # set for different microbatches
     new_forward_context.moe_comm_method = get_moe_comm_method(
         new_forward_context.moe_comm_type, ubatch_num)
@@ -280,7 +280,9 @@ def create_ascend_forward_context(
     new_forward_context.dbo_first_layer_sync = True
 
     # vllm-ascend use global cos/sin cache, which should be sliced when using dbo
-    from vllm_ascend.ops.rotary_embedding import update_cos_sin, get_cos_and_sin_slice, get_cos_and_sin_mla
+    from vllm_ascend.ops.rotary_embedding import (get_cos_and_sin_mla,
+                                                  get_cos_and_sin_slice,
+                                                  update_cos_sin)
     if ubatch_slices and ubatch_slices[ubatch_num]:
         token_slice = ubatch_slices[ubatch_num].token_slice
         positions = positions[token_slice]

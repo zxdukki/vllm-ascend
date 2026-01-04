@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from typing import Optional
 from enum import Enum
+from typing import Optional
 
 import torch
-
 from vllm import forward_context
 from vllm.forward_context import ForwardContext
 from vllm.v1.worker.ubatching import UBatchContext
+
 from vllm_ascend import envs
 from vllm_ascend.utils import dbo_current_stream, dbo_set_stream
 

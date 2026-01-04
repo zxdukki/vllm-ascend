@@ -1,4 +1,5 @@
 from vllm.forward_context import get_forward_context
+
 from vllm_ascend.dbo.overlap_templates.base import UbatchOverlapBaseTemplate
 from vllm_ascend.worker.ubatching import (UBatchEventKey,
                                           dbo_record_current_stream,
@@ -7,7 +8,7 @@ from vllm_ascend.worker.ubatching import (UBatchEventKey,
 
 class QwenMoEAllgatherTemplate(UbatchOverlapBaseTemplate):
     # DBO overlap policy for A2:
-    # qwen3 donot use mla preprocess
+    # qwen3 do not use mla preprocess
     def dbo_mla_preprocess_hook(self, is_record):
         pass
 

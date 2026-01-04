@@ -50,15 +50,14 @@ from torch import nn
 from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
 from vllm.distributed import (split_tensor_along_last_dim,
-                              tensor_model_parallel_all_reduce,
                               tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
-from vllm.distributed.parallel_state import get_tp_group, get_ep_group
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
@@ -68,10 +67,6 @@ from vllm_ascend.utils import (enable_dsa_cp, enable_dsa_cp_with_layer_shard, en
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
                                oproj_tp_enable, shared_expert_dp_enabled)
-
-from vllm_ascend.worker.ubatching import (dbo_record_current_stream,
-                                          dbo_wait_current_stream_and_yield,
-                                          UBatchEventKey)
 
 
 class CustomLinearOp:

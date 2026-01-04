@@ -48,10 +48,6 @@ from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, maybe_trans_nz, vllm_version_is, weak_ref_tensors
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
-from vllm_ascend.worker.ubatching import (UBatchEventKey,
-                                          dbo_record_current_stream,
-                                          dbo_wait_current_stream_and_yield)
-
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 

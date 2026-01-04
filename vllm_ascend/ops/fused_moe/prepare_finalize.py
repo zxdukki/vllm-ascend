@@ -22,7 +22,9 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-from vllm.distributed import tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather, tensor_model_parallel_reduce_scatter
+from vllm.distributed import (tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_reduce_scatter)
 from vllm.distributed.parallel_state import (
     get_dp_group, get_ep_group, get_pcp_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
