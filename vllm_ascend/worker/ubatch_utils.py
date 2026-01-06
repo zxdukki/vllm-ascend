@@ -20,10 +20,11 @@ from vllm_ascend.worker.npu_ubatch_wrapper import NPUCoreControlContextManager
 logger = init_logger(__name__)
 
 
-# TODO: this should be updated to is_last_ubatch_empty after testing XBO extensions in vLLM
-def is_second_ubatch_empty(orig_num_tokens: int,
-                           padded_num_tokens: int) -> bool:
-    return (padded_num_tokens // 2) >= orig_num_tokens
+def is_last_ubatch_empty(orig_num_tokens: int,
+                         padded_num_tokens: int,
+                         num_ubatches: int = 2) -> bool:
+    return (padded_num_tokens // num_ubatches) * (num_ubatches -
+                                                  1) >= orig_num_tokens
 
 
 def should_ubatch_across_dp(
@@ -66,7 +67,7 @@ def should_ubatch_across_dp(
 
     orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
     padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
-    if is_second_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
+    if is_last_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
         logger.debug("Aborting ubatching %s %s", orig_min_num_tokens,
                      padded_max_num_tokens)
         return False, None
@@ -131,7 +132,7 @@ def get_dp_padding_ubatch(
 
     # Sanity Check that the existing padding isn't giving us an empty second
     # ubatch. Abort if so
-    if is_second_ubatch_empty(num_tokens_unpadded, num_tokens_padded):
+    if is_last_ubatch_empty(num_tokens_unpadded, num_tokens_padded):
         logger.debug(
             "Empty second µbatch detected: unpadded tokens: %s, padded "
             "tokens: %s", num_tokens_unpadded, num_tokens_padded)
@@ -154,45 +155,48 @@ def get_dp_padding_ubatch(
                                             dtype=torch.int32)
     return should_ubatch, num_tokens_after_padding
 
-def create_ubatch_slices(num_scheduled_tokens: np.ndarray, split_point: int, request_level_split: bool = False) \
+def create_ubatch_slices(num_scheduled_tokens: np.ndarray, token_split_points: list[int], request_level_split: bool = False) \
     -> UBatchSlices:
-    # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
-    # in cu_num_tokens directly (i.e. query_start_loc)
     cu_num_tokens = np.zeros(len(num_scheduled_tokens) + 1, dtype=np.int32)
     np.cumsum(num_scheduled_tokens, dtype=np.int32, out=cu_num_tokens[1:])
 
+    ubatch_slices = []
+    start_token = 0
+    # Add the end point to the split points to make iteration easier
+    all_points = token_split_points + [cu_num_tokens[-1]]
     if not request_level_split:
-        first_ubatch_token_slice = slice(0, split_point)
-        second_ubatch_token_slice = slice(split_point, cu_num_tokens[-1])
+        for end_token in all_points:
+            token_slice = slice(start_token, end_token)
+            # Determine request slices using exclusive stop semantics
+            # Ubatch includes requests whose tokens overlap [start_token, end_token)
 
-        first_ubatch_req_stop = int(
-            np.searchsorted(cu_num_tokens, split_point, side="left"))
-        second_ubatch_req_start = int(
-            np.searchsorted(cu_num_tokens, split_point, side="right") - 1)
-        # Determine request slices using exclusive stop semantics
-        # First ubatch includes requests whose tokens overlap [0, split_point)
-        first_ubatch_req_slice = slice(0, first_ubatch_req_stop)
+            # Start at the request that contains the start_token
+            # or the request starting exactly at start_token (if on boundary)
+            req_start = int(
+                np.searchsorted(cu_num_tokens, start_token, side="right") - 1)
 
-        # Second ubatch starts at the request that contains the split_point
-        # or the request starting exactly at split_point (if on boundary)
-        second_ubatch_req_slice = slice(second_ubatch_req_start,
-                                        len(cu_num_tokens) - 1)
+            # Stop at the request that starts at or after end_token
+            req_stop = int(
+                np.searchsorted(cu_num_tokens, end_token, side="left"))
+
+            req_slice = slice(req_start, req_stop)
+            ubatch_slices.append(UBatchSlice(req_slice, token_slice))
+
+            start_token = end_token
+
     else:
-        # currently split by requests
-        second_ubatch_req_start = int(
-            np.searchsorted(cu_num_tokens, split_point, side="right") - 1)
-        first_ubatch_req_slice = slice(0, second_ubatch_req_start)
-        second_ubatch_req_slice = slice(second_ubatch_req_start,
-                                        len(cu_num_tokens) - 1)
-        first_ubatch_token_slice = slice(
-            0, cu_num_tokens[second_ubatch_req_start])
-        second_ubatch_token_slice = slice(
-            cu_num_tokens[second_ubatch_req_start], cu_num_tokens[-1])
+        # if split by requests
+        for end_token in all_points:
+            req_start = int(
+                np.searchsorted(cu_num_tokens, start_token, side="right") - 1)
+            req_stop = int(
+                np.searchsorted(cu_num_tokens, end_token, side="right") - 1)
+            req_slice = slice(req_start, req_stop)
+            token_slice = slice(cu_num_tokens[req_start],
+                                cu_num_tokens[req_stop])
+            ubatch_slices.append(UBatchSlice(req_slice, token_slice))
 
-    return [
-        UBatchSlice(first_ubatch_req_slice, first_ubatch_token_slice),
-        UBatchSlice(second_ubatch_req_slice, second_ubatch_token_slice)
-    ]
+    return ubatch_slices
 
 
 def check_enable_ubatch(num_scheduled_tokens_per_request: np.ndarray,
@@ -217,7 +221,7 @@ def check_enable_ubatch(num_scheduled_tokens_per_request: np.ndarray,
 
     # Sanity Check that the existing padding isn't giving us an empty second
     # ubatch. Abort if so
-    if is_second_ubatch_empty(num_tokens_unpadded, num_tokens_padded):
+    if is_last_ubatch_empty(num_tokens_unpadded, num_tokens_padded):
         logger.debug(
             "Empty second µbatch detected: unpadded tokens: %s, padded "
             "tokens: %s", num_tokens_unpadded, num_tokens_padded)
@@ -275,17 +279,23 @@ def maybe_create_ubatch_slices(
     ]
 
     """
-
-    num_tokens_padded = round_up(num_tokens_unpadded, 2)
+    if hasattr(vllm_config.parallel_config, 'num_ubatches'):
+        num_ubatches = vllm_config.parallel_config.num_ubatches
+    else:
+        num_ubatches = 2
+    num_tokens_padded = round_up(num_tokens_unpadded, num_ubatches)
 
     dp_size = vllm_config.parallel_config.data_parallel_size
     if dp_size == 1:
-        token_split_point = int(num_tokens_unpadded) // 2
+        token_split_point = int(num_tokens_unpadded) // num_ubatches
     else:
-        token_split_point = int(num_tokens_padded) // 2
+        token_split_point = int(num_tokens_padded) // num_ubatches
 
+    token_split_points = [
+        token_split_point * i for i in range(1, num_ubatches)
+    ]
     ubatch_slices = create_ubatch_slices(num_scheduled_tokens_per_request,
-                                         token_split_point,
+                                         token_split_points,
                                          request_level_split)
     return ubatch_slices
 

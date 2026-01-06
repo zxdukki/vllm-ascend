@@ -2521,6 +2521,7 @@ class NPUModelRunner(GPUModelRunner):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
+            # TODO(zxdu): should update to use_ubatching in v0.14.0
             if not self.parallel_config.enable_dbo:
                 self.model = ACLGraphWrapper(self.model,
                                              self.vllm_config,
@@ -2998,6 +2999,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_groups: list[AttentionGroup] = []
             for (attn_backend,
                  kv_cache_spec), layer_names in attn_backends_map.items():
+                # TODO(zxdu): should update to use_ubatching in 0.14.0
                 attn_metadata_builders = [
                     attn_backend.get_builder_cls()(
                         kv_cache_spec,
