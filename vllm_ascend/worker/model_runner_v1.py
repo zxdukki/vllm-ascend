@@ -463,7 +463,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens: int,
         with_prefill: bool = False,
         is_draft_model: bool = False
-    ) -> tuple[int, Optional[torch.Tensor], bool]:
+    ) -> tuple[int, int, Optional[torch.Tensor], bool]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
         # include them in the all_reduce operation, and more over, we CANNOT skip it
@@ -471,14 +471,14 @@ class NPUModelRunner(GPUModelRunner):
         # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
         # immediately once the other two flags are no longer needed.
         if self.dp_size == 1:
-            return num_tokens, None, with_prefill
+            return num_tokens, num_tokens, None, with_prefill
 
         if self._skip_all_reduce_across_dp_group(is_draft_model):
             num_tokens_after_padding = torch.tensor([num_tokens] *
                                                     self.dp_size,
                                                     device="cpu",
                                                     dtype=torch.int32)
-            return num_tokens, num_tokens_after_padding, with_prefill
+            return num_tokens, num_tokens, num_tokens_after_padding, with_prefill
 
         # Sync num_tokens, with_prefill across dp ranks
         num_tokens_tensor = torch.tensor([
@@ -501,6 +501,7 @@ class NPUModelRunner(GPUModelRunner):
         synced_flags = packed_tensor[-1:]
 
         max_tokens_across_dp = torch.max(num_tokens_across_dp).item()
+        min_tokens_across_dp = torch.min(num_tokens_across_dp).item()
         global_with_prefill = bool(synced_flags[0])
 
         # Create a tensor for num_tokens_after_padding
@@ -509,34 +510,7 @@ class NPUModelRunner(GPUModelRunner):
                                                 device="cpu",
                                                 dtype=torch.int32)
 
-        return max_tokens_across_dp, num_tokens_after_padding, global_with_prefill
-
-    def _sync_enable_dbo_across_dp(self, enable_dbo: bool) -> bool:
-        # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
-        # our case, we still need to sync the other two flags as well. So we need to
-        # include them in the all_reduce operation, and more over, we CANNOT skip it
-        # even if we are running in eager mode, which harms performance.
-        # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
-        # immediately once the other two flags are no longer needed.
-        if self.dp_size == 1:
-            return enable_dbo
-
-        # Sync enable_dbo across dp ranks
-
-        flags_tensor = torch.tensor([int(enable_dbo)],
-                                    dtype=torch.int32,
-                                    device="cpu")
-
-        # use cpu_group to avoid cpu synchronization issue.
-        # it can be overlapped with main moell execution on npu.
-        dist.all_reduce(flags_tensor, group=get_dp_group().cpu_group)
-
-        # Unpack the results
-        enable_dbo_sum = flags_tensor[0]
-        # all the ranks should execute dummy run at the same time
-        global_enable_dbo = enable_dbo_sum == get_dp_group().world_size
-
-        return global_enable_dbo
+        return max_tokens_across_dp, min_tokens_across_dp, num_tokens_after_padding, global_with_prefill
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -635,6 +609,55 @@ class NPUModelRunner(GPUModelRunner):
                 out=positions_np,
             )
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
+
+        '''uniform_decode = \
+            (max_num_scheduled_tokens == self.uniform_decode_query_len) and \
+            (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
+        moe_comm_type = select_moe_comm_method(num_input_tokens,
+                                               self.vllm_config)
+        # in vllm_ascend, we first check if we can split ubatches locally,
+        # and then sync with other ranks if we enable dp in sync_metadata_across_dp
+        # the logic may be slightly different with vllm currently
+        ubatch_slices = None
+
+        # Get info across DP ranks.
+        # NOTE: maybe_padded_num_tokens is only used when using TorchAir with DP,
+        # Otherwise, it's just max_tokens_across_dp_cpu
+        (maybe_padded_num_tokens, min_tokens_across_dp, num_tokens_across_dp,
+         with_prefill) = self._sync_metadata_across_dp(num_input_tokens,
+                                                       with_prefill)
+        self.with_prefill = with_prefill
+
+        # make sure that all the ranks can pad to maybe_padded_num_tokens when enabling ubatch
+        enable_dbo = check_enable_ubatch(
+            num_scheduled_tokens,
+            min_tokens_across_dp,
+            maybe_padded_num_tokens,
+            uniform_decode=uniform_decode,
+            vllm_config=self.vllm_config,
+            moe_comm_type=moe_comm_type,
+        )
+
+        uniform_decode = (max_num_scheduled_tokens == self.uniform_decode_query_len) \
+            and (total_num_scheduled_tokens == max_num_scheduled_tokens * num_reqs)
+        has_lora = len(self.input_batch.lora_id_to_lora_request) > 0
+        _, batch_descriptor = \
+            self.cudagraph_dispatcher.dispatch(num_tokens=maybe_padded_num_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
+        num_ubatch_tokens_padded = batch_descriptor.num_tokens
+        num_ubatch_reqs_padded = (batch_descriptor.num_reqs
+                                  if batch_descriptor.num_reqs is not None else
+                                  num_reqs)
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            enable_dbo,
+            num_scheduled_tokens,
+            num_ubatch_tokens_padded,
+            num_ubatch_reqs_padded,
+            vllm_config=self.vllm_config)
+
+        # TODO: Now that num_input_tokens is basically identical with maybe_padded_num_tokens
+        # We should consider removing maybe_padded_num_tokens later
+        num_input_tokens = maybe_padded_num_tokens'''
+
 
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -829,6 +852,9 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
 
+            pad_attn = self.compilation_config.cudagraph_mode.decode_mode(
+            ) == CUDAGraphMode.FULL
+            ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
@@ -2305,6 +2331,29 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs_padded = (
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
+
+        '''moe_comm_type = select_moe_comm_method(num_tokens, self.vllm_config)
+        # make sure that all the ranks can pad to maybe_padded_num_tokens when enabling ubatch
+        enable_dbo = check_enable_ubatch(
+            num_scheduled_tokens,
+            min_tokens_across_dp,
+            num_tokens,
+            uniform_decode=uniform_decode,
+            vllm_config=self.vllm_config,
+            moe_comm_type=moe_comm_type,
+        )
+
+        num_tokens_padded = batch_descriptor.num_tokens
+        num_reqs_padded = (batch_descriptor.num_reqs if
+                           batch_descriptor.num_reqs is not None else num_reqs)
+
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            enable_dbo,
+            num_scheduled_tokens,
+            num_tokens_padded,
+            num_reqs_padded,
+            vllm_config=self.vllm_config)'''
+
         if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
@@ -2419,8 +2468,11 @@ class NPUModelRunner(GPUModelRunner):
                     return self.drafter.model.compute_logits(
                         hidden_states[dummy_indices])
 
-            if ubatch_slices is not None:
-                num_tokens_padded = ubatch_slices[0].num_tokens
+            if ubatch_slices_padded is not None:
+                # Adjust values to reflect a single ubatch.
+                # TODO(sage,lucas): this is cruft that should be addressed in
+                #  the padding refactor.
+                num_tokens_padded = ubatch_slices_padded[0].num_tokens
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
@@ -2434,7 +2486,7 @@ class NPUModelRunner(GPUModelRunner):
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     model_instance=self.model,
-                    ubatch_slices=ubatch_slices):
+                    ubatch_slices=ubatch_slices_padded):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions,
                     intermediate_tensors, inputs_embeds)
@@ -2532,6 +2584,7 @@ class NPUModelRunner(GPUModelRunner):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
+            # TODO(zxdu): should update to use_ubatching in v0.14.0
             if not self.parallel_config.enable_dbo:
                 self.model = ACLGraphWrapper(self.model,
                                              self.vllm_config,
@@ -3014,6 +3067,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_groups: list[AttentionGroup] = []
             for (attn_backend,
                  kv_cache_spec), layer_names in attn_backends_map.items():
+                # TODO(zxdu): should update to use_ubatching in 0.14.0
                 attn_metadata_builders = [
                     attn_backend.get_builder_cls()(
                         kv_cache_spec,

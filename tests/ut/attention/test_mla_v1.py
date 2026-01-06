@@ -977,6 +977,7 @@ class TestAscendMLAImpl(TestBase):
     def test_mla_preprocess(self, mock_get_forward_context, magic_npu_fetch,
                             mock_maybe_all_gather_and_maybe_unpad):
         mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value.dbo_enabled = False
         magic_npu_fetch.return_value = MagicMock()
         mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
         batch_size = 4
