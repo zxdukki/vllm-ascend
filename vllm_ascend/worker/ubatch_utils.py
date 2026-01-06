@@ -11,14 +11,19 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatch_utils import (UBatchSlice, UBatchSlices,
-                                         check_ubatch_thresholds,
-                                         is_second_ubatch_empty)
+                                         check_ubatch_thresholds)
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import dbo_current_stream
 from vllm_ascend.worker.npu_ubatch_wrapper import NPUCoreControlContextManager
 
 logger = init_logger(__name__)
+
+
+# TODO: this should be updated to is_last_ubatch_empty after testing XBO extensions in vLLM
+def is_second_ubatch_empty(orig_num_tokens: int,
+                           padded_num_tokens: int) -> bool:
+    return (padded_num_tokens // 2) >= orig_num_tokens
 
 
 def should_ubatch_across_dp(

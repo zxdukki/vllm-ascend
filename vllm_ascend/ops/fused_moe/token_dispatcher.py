@@ -442,7 +442,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         ) = self._dispatch_preprocess(hidden_states, topk_ids)
 
         forward_context = get_forward_context()
-        if forward_context.dbo_enabled():
+        if forward_context.dbo_enabled:
             forward_context.dbo_template.dbo_moe_prepare_hook(is_record=True)
         dynamic_scale_after_all2all = None
         if self.with_quant:
@@ -459,7 +459,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         permute1_ep_all_to_all_handle.wait()
 
         permutated_local_input_tokens.untyped_storage().resize_(0)
-        if forward_context.dbo_enabled():
+        if forward_context.dbo_enabled:
             forward_context.dbo_template.dbo_moe_prepare_hook(is_record=False)
         # Postprocess
         global_input_tokens, dynamic_scale_final, reversed_global_input_permutation_mapping = self._dispatch_postprocess(
@@ -497,7 +497,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         # 2. AllToAll
 
         forward_context = get_forward_context()
-        if forward_context.dbo_enabled():
+        if forward_context.dbo_enabled:
             forward_context.dbo_template.dbo_moe_finalize_hook(is_record=True)
 
         _, permutated_local_input_tokens, handle = async_all_to_all(
@@ -508,7 +508,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         )
         handle.wait()
 
-        if forward_context.dbo_enabled():
+        if forward_context.dbo_enabled:
             forward_context.dbo_template.dbo_moe_finalize_hook(is_record=False)
         hidden_states.untyped_storage().resize_(0)
 
