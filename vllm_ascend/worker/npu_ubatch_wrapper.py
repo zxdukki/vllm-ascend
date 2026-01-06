@@ -94,8 +94,13 @@ class AscendUBatchWrapper(UBatchWrapper):
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.comm_stream = torch.npu.Stream(device=device)
-        # Two ubatch threads plus the main thread
-        self.ready_barrier = threading.Barrier(3)
+        # Ubatch threads plus the main thread
+        # TODO(zxdu): update it at v0.14.0
+        if hasattr(self.vllm_config.parallel_config, 'num_ubatches'):
+            num_ubatches = self.vllm_config.parallel_config.num_ubatches
+        else:
+            num_ubatches = 2
+        self.ready_barrier = threading.Barrier(num_ubatches + 1)
 
         self.cudagraphs: dict[int, AscendNPUGraphMetaData] = {}
 
@@ -283,7 +288,7 @@ class AscendUBatchWrapper(UBatchWrapper):
                     attn_metadata=attn_metadata[i]
                     if attn_metadata is not None else None,
                     vllm_config=self.vllm_config,
-                    dp_metadata=dp_metadata,
+                    dp_metadata=dp_metadata[i],
                     ubatch_slices=ubatch_slices,
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -387,25 +392,24 @@ class AscendUBatchWrapper(UBatchWrapper):
         inputs_embeds = kwargs['inputs_embeds']
         compute_stream = torch.npu.current_stream()
 
-        dp_metadata = forward_context.dp_metadata
-        # We shouldn't be here unless we are running with multiple DP ranks
-        # assert dp_metadata is not None
-
-        num_tokens_per_ubatch = (ubatch_slices[0].token_slice.stop -
-                                 ubatch_slices[0].token_slice.start)
+        ubatch_dp_metadata = []
         dp_size = self.vllm_config.parallel_config.data_parallel_size
-        if dp_size > 1:
-            ubatch_num_tokens_across_dp = torch.tensor(
-                [num_tokens_per_ubatch] * dp_size,
-                device="cpu",
-                dtype=torch.int32)
-            ubatch_dp_metadata = DPMetadata.make(
-                self.vllm_config.parallel_config,
-                num_tokens_per_ubatch,
-                ubatch_num_tokens_across_dp,
-            )
-        else:
-            ubatch_dp_metadata = None
+
+        for ubatch_slice in ubatch_slices:
+            if dp_size > 1:
+                ubatch_num_tokens_across_dp = torch.tensor(
+                    [ubatch_slice.num_tokens] * dp_size,
+                    device="cpu",
+                    dtype=torch.int32)
+                ubatch_dp_metadata.append(
+                    DPMetadata.make(
+                        self.vllm_config.parallel_config,
+                        ubatch_slice.num_tokens,
+                        ubatch_num_tokens_across_dp,
+                    ))
+            else:
+                ubatch_dp_metadata.append(None)
+
 
         if num_tokens not in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
@@ -439,7 +443,7 @@ class AscendUBatchWrapper(UBatchWrapper):
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
                 compute_stream=compute_stream,
-                dp_metadata=dp_metadata,
+                dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
             return self._run_ubatches(ubatch_metadata, self.model)
