@@ -150,7 +150,7 @@ def maybe_create_ubatch_slices(
     num_reqs_padded: int,
     vllm_config: VllmConfig,
     request_level_split: bool = False,
-) -> Optional[UBatchSlices]:
+) -> tuple[UBatchSlices | None, UBatchSlices | None]:
     if not should_ubatch:
         return None, None
 

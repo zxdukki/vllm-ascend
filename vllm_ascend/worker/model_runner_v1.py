@@ -31,8 +31,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from typing_extensions import TypeAlias
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata, AttentionType)
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
@@ -615,10 +613,6 @@ class NPUModelRunner(GPUModelRunner):
             (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
         moe_comm_type = select_moe_comm_method(num_input_tokens,
                                                self.vllm_config)
-        # in vllm_ascend, we first check if we can split ubatches locally,
-        # and then sync with other ranks if we enable dp in sync_metadata_across_dp
-        # the logic may be slightly different with vllm currently
-        ubatch_slices = None
 
         # Get info across DP ranks.
         # NOTE: maybe_padded_num_tokens is only used when using TorchAir with DP,

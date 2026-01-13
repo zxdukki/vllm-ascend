@@ -422,7 +422,7 @@ def _make_metadata_with_slice(
     positions = attn_metadata.positions[token_slice]
     attn_state = attn_metadata.attn_state
     #if attn_metadata.attn_state != AscendAttentionState.ChunkedPrefill:
-    attn_mask = attn_metadata.attn_mask
+    #attn_mask = attn_metadata.attn_mask
 
     if len(attn_metadata.actual_seq_lengths_q) > 0:
         actual_seq_lengths_q = list(
@@ -440,17 +440,17 @@ def _make_metadata_with_slice(
         num_actual_tokens=num_actual_tokens,
         num_input_tokens=num_input_tokens,
         actual_seq_lengths_q=actual_seq_lengths_q,
-        num_computed_tokens_cpu=num_computed_tokens_cpu,
-        max_query_len=max_query_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        num_computed_tokens_cpu=num_computed_tokens_cpu,
         positions=positions,
-        max_seq_len=max_seq_len,
-        attn_mask=attn_mask,
-        spec_attn_mask=attn_metadata.spec_attn_mask,
         attn_state=attn_state,
-        graph_pad_size=attn_metadata.graph_pad_size,
+        max_query_len=max_query_len,
         decode_token_per_req=attn_metadata.decode_token_per_req,
+        max_seq_len=max_seq_len,
+        #attn_mask=attn_mask,
+        #spec_attn_mask=attn_metadata.spec_attn_mask,
+        graph_pad_size=attn_metadata.graph_pad_size,
     )
 
 
