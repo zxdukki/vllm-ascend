@@ -1,9 +1,7 @@
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.dbo.overlap_templates.base import UbatchOverlapBaseTemplate
-from vllm_ascend.worker.ubatching import (UBatchEventKey,
-                                          dbo_record_current_stream,
-                                          dbo_wait_current_stream_and_yield)
+from vllm_ascend.worker.ubatching import UBatchEventKey, dbo_record_current_stream, dbo_wait_current_stream_and_yield
 
 
 class QwenMoEAllgatherTemplate(UbatchOverlapBaseTemplate):

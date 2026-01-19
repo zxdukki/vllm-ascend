@@ -305,8 +305,7 @@ def current_stream() -> torch.npu.Stream:
 
 
 def dbo_current_stream() -> torch.npu.Stream:
-    if not hasattr(_current_stream_tls,
-                   "value") or _current_stream_tls.value is None:
+    if not hasattr(_current_stream_tls, "value") or _current_stream_tls.value is None:
         _current_stream_tls.value = torch.npu.current_stream()
     return _current_stream_tls.value
 

@@ -1,6 +1,5 @@
 from vllm_ascend.dbo.overlap_templates.base import UbatchOverlapBaseTemplate
-from vllm_ascend.worker.ubatching import (dbo_record_current_stream,
-                                          dbo_wait_current_stream_and_yield)
+from vllm_ascend.worker.ubatching import dbo_record_current_stream, dbo_wait_current_stream_and_yield
 
 
 class QwenDenseAllgatherTemplate(UbatchOverlapBaseTemplate):

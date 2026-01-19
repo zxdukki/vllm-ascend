@@ -324,27 +324,24 @@ def slice_query_start_locs(
     request_slice: slice,
 ) -> torch.Tensor:
     """
-    Creates a new query_start_loc that corresponds to the requests in 
+    Creates a new query_start_loc that corresponds to the requests in
     request_slice.
 
     Note: This function creates a new tensor to hold the new query_start_locs.
     This will break cudagraph compatibility.
     """
-    return query_start_loc[request_slice.start: request_slice.stop + 1] -\
-        query_start_loc[request_slice.start]
+    return query_start_loc[request_slice.start : request_slice.stop + 1] - query_start_loc[request_slice.start]
 
 
 def _make_metadata_with_slice(
-        ubatch_slice: UBatchSlice,
-        attn_metadata: AscendCommonAttentionMetadata,
-        max_num_tokens: int = 0) -> AscendCommonAttentionMetadata:
+    ubatch_slice: UBatchSlice, attn_metadata: AscendCommonAttentionMetadata, max_num_tokens: int = 0
+) -> AscendCommonAttentionMetadata:
     """
-    This function creates a new CommonAttentionMetadata that corresponds to 
+    This function creates a new CommonAttentionMetadata that corresponds to
     the requests included in ubatch_slice
     """
 
-    assert not ubatch_slice.is_empty(), (
-        f"Ubatch slice {ubatch_slice} is empty")
+    assert not ubatch_slice.is_empty(), f"Ubatch slice {ubatch_slice} is empty"
 
     request_slice = ubatch_slice.request_slice
     token_slice = ubatch_slice.token_slice
@@ -355,10 +352,8 @@ def _make_metadata_with_slice(
     last_req = request_slice.stop - 1
     last_tok = token_slice.stop - 1
 
-    assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], \
-        "Token slice start outside of first request"
-    assert start_locs[last_req] <= last_tok < start_locs[last_req+1], \
-        "Token slice end outside of last request"
+    assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], "Token slice start outside of first request"
+    assert start_locs[last_req] <= last_tok < start_locs[last_req + 1], "Token slice end outside of last request"
 
     # If the request is split across ubatches, we have to adjust the metadata.
     # splits_first_request: The first request in this slice is the continuation of
@@ -369,12 +364,9 @@ def _make_metadata_with_slice(
     splits_last_request = last_tok < start_locs[last_req + 1] - 1
 
     query_start_loc_cpu = slice_query_start_locs(start_locs, request_slice)
-    query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc,
-                                             request_slice)
+    query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc, request_slice)
 
-    assert len(query_start_loc) >= 2, (
-        f"query_start_loc must have at least 2 elements, "
-        f"got {len(query_start_loc)}")
+    assert len(query_start_loc) >= 2, f"query_start_loc must have at least 2 elements, got {len(query_start_loc)}"
 
     if splits_first_request:
         tokens_skipped = first_tok - start_locs[first_req]
@@ -400,14 +392,11 @@ def _make_metadata_with_slice(
         seq_lens_cpu[-1] -= tokens_skipped
 
     max_seq_len = int(seq_lens_cpu.max())
-    num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
-        request_slice]
+    num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[request_slice]
 
     num_requests = request_slice.stop - request_slice.start
     num_actual_tokens = token_slice.stop - token_slice.start
-    max_query_len = int(
-        torch.max(torch.abs(query_start_loc_cpu[1:] -
-                            query_start_loc_cpu[:-1])).item())
+    max_query_len = int(torch.max(torch.abs(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])).item())
 
     # This is to account for the case where we are in a dummy
     # run and query_start_loc_cpu is full of 0s
@@ -421,13 +410,13 @@ def _make_metadata_with_slice(
     num_input_tokens = token_slice.stop - token_slice.start
     positions = attn_metadata.positions[token_slice]
     attn_state = attn_metadata.attn_state
-    #if attn_metadata.attn_state != AscendAttentionState.ChunkedPrefill:
-    #attn_mask = attn_metadata.attn_mask
+    # if attn_metadata.attn_state != AscendAttentionState.ChunkedPrefill:
+    # attn_mask = attn_metadata.attn_mask
 
     if len(attn_metadata.actual_seq_lengths_q) > 0:
         actual_seq_lengths_q = list(
-            range(attn_metadata.decode_token_per_req, max_num_tokens + 1,
-                  attn_metadata.decode_token_per_req))
+            range(attn_metadata.decode_token_per_req, max_num_tokens + 1, attn_metadata.decode_token_per_req)
+        )
     else:
         actual_seq_lengths_q = []
 
@@ -448,8 +437,8 @@ def _make_metadata_with_slice(
         max_query_len=max_query_len,
         decode_token_per_req=attn_metadata.decode_token_per_req,
         max_seq_len=max_seq_len,
-        #attn_mask=attn_mask,
-        #spec_attn_mask=attn_metadata.spec_attn_mask,
+        # attn_mask=attn_mask,
+        # spec_attn_mask=attn_metadata.spec_attn_mask,
         graph_pad_size=attn_metadata.graph_pad_size,
     )
 
@@ -460,15 +449,13 @@ def split_attn_metadata(
     max_num_tokens: int = 0,
 ) -> list[AscendCommonAttentionMetadata]:
     """
-    Creates a new CommonAttentionMetadata instance that corresponds to the 
+    Creates a new CommonAttentionMetadata instance that corresponds to the
     requests for each UBatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata
     """
     results = []
     for ubatch_slice in ubatch_slices:
-        results.append(
-            _make_metadata_with_slice(ubatch_slice, common_attn_metadata,
-                                      max_num_tokens))
+        results.append(_make_metadata_with_slice(ubatch_slice, common_attn_metadata, max_num_tokens))
 
     return results

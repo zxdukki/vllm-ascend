@@ -1,13 +1,10 @@
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.dbo.overlap_templates.base import UbatchOverlapBaseTemplate
-from vllm_ascend.worker.ubatching import (UBatchEventKey,
-                                          dbo_record_current_stream,
-                                          dbo_wait_current_stream_and_yield)
+from vllm_ascend.worker.ubatching import UBatchEventKey, dbo_record_current_stream, dbo_wait_current_stream_and_yield
 
 
 class DeepseekAllgatherTemplate(UbatchOverlapBaseTemplate):
-
     # DBO overlap policy for A2:
     # mla preprocess allgather, overlap together with prev layer's moe finalize comm
     def dbo_mla_preprocess_hook(self, is_record):
@@ -40,7 +37,6 @@ class DeepseekAllgatherTemplate(UbatchOverlapBaseTemplate):
 
 
 class DeepseekAlltoallTemplate(UbatchOverlapBaseTemplate):
-
     # DBO overlap policy for A3:
     # mla preprocess allgather, overlap together with prev layer's moe dispatch comm
     def dbo_mla_preprocess_hook(self, is_record):
@@ -56,8 +52,7 @@ class DeepseekAlltoallTemplate(UbatchOverlapBaseTemplate):
         if is_record:
             dbo_record_current_stream(event=UBatchEventKey.ATTN_POST)
         else:
-            dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_POST,
-                                              wait=False)
+            dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_POST, wait=False)
 
     def dbo_linear_column_hook(self, is_record):
         pass
@@ -66,8 +61,7 @@ class DeepseekAlltoallTemplate(UbatchOverlapBaseTemplate):
         if is_record:
             dbo_record_current_stream(event=UBatchEventKey.MOE_DISPATCH)
         else:
-            dbo_wait_current_stream_and_yield(
-                event=UBatchEventKey.MOE_DISPATCH)
+            dbo_wait_current_stream_and_yield(event=UBatchEventKey.MOE_DISPATCH)
 
     def dbo_moe_finalize_hook(self, is_record):
         if is_record:

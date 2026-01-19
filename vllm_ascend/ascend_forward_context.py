@@ -7,7 +7,6 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, DPMetadata, ForwardContext, get_forward_context, set_forward_context
-
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
 import vllm_ascend.envs as envs_ascend
@@ -190,19 +189,19 @@ def set_ascend_forward_context(
 
 
 def create_ascend_forward_context(
-        cur_forward_context: Any,
-        attn_metadata: Any,
-        vllm_config: VllmConfig,
-        ubatch_slices: list[UBatchSlices],
-        virtual_engine: int = 0,
-        ubatch_num: int = 0,
-        dp_metadata: DPMetadata | None = None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        batch_descriptor: BatchDescriptor | None = None,
-        reserved_mc2_mask: torch.Tensor | None = None,
-        positions: Any = None,
-        dbo_template: Any = None):
-
+    cur_forward_context: Any,
+    attn_metadata: Any,
+    vllm_config: VllmConfig,
+    ubatch_slices: list[UBatchSlices],
+    virtual_engine: int = 0,
+    ubatch_num: int = 0,
+    dp_metadata: DPMetadata | None = None,
+    cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    batch_descriptor: BatchDescriptor | None = None,
+    reserved_mc2_mask: torch.Tensor | None = None,
+    positions: Any = None,
+    dbo_template: Any = None,
+):
     new_forward_context = ForwardContext(
         no_compile_layers=vllm_config.compilation_config.
         static_forward_context,
@@ -211,7 +210,8 @@ def create_ascend_forward_context(
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
-        ubatch_slices=ubatch_slices)
+        ubatch_slices=ubatch_slices,
+    )
 
     new_forward_context.sp_enabled = cur_forward_context.sp_enabled
 
@@ -221,8 +221,7 @@ def create_ascend_forward_context(
     dp_world_size = get_dp_group().world_size
 
     new_forward_context.flashcomm_v2_enabled = cur_forward_context.flashcomm_v2_enabled
-    if (new_forward_context.sp_enabled
-            or new_forward_context.flashcomm_v2_enabled):
+    if new_forward_context.sp_enabled or new_forward_context.flashcomm_v2_enabled:
         pad_size = (
             tp_world_size -
             (new_forward_context.num_tokens % tp_world_size)) % tp_world_size
@@ -231,11 +230,10 @@ def create_ascend_forward_context(
     if dp_world_size > 1 and new_forward_context.dp_metadata is not None:
         max_tokens_across_dp = new_forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
         )
-        if (new_forward_context.sp_enabled
-                or new_forward_context.flashcomm_v2_enabled):
+        if new_forward_context.sp_enabled or new_forward_context.flashcomm_v2_enabled:
             new_forward_context.padded_length = (
-                max_tokens_across_dp + tp_world_size -
-                1) // tp_world_size * tp_world_size
+                (max_tokens_across_dp + tp_world_size - 1) // tp_world_size *
+                tp_world_size)
             new_forward_context.pad_size = new_forward_context.padded_length - new_forward_context.num_tokens
     else:
         max_tokens_across_dp = new_forward_context.num_tokens
@@ -259,9 +257,9 @@ def create_ascend_forward_context(
     new_forward_context.dbo_template = dbo_template
 
     if new_forward_context.num_tokens:
-        new_forward_context.padded_num_tokens = math.ceil(
-            new_forward_context.max_tokens_across_dp /
-            tp_world_size) * tp_world_size
+        new_forward_context.padded_num_tokens = (math.ceil(
+            new_forward_context.max_tokens_across_dp / tp_world_size) *
+                                                 tp_world_size)
         if get_mc2_mask() is not None:
             reserved_mc2_mask = torch.zeros(
                 cur_forward_context.mc2_mask.shape,
@@ -278,9 +276,8 @@ def create_ascend_forward_context(
     new_forward_context.dbo_first_layer_sync = True
 
     # vllm-ascend use global cos/sin cache, which should be sliced when using dbo
-    from vllm_ascend.ops.rotary_embedding import (get_cos_and_sin_mla,
-                                                  get_cos_and_sin_slice,
-                                                  update_cos_sin)
+    from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla, get_cos_and_sin_slice, update_cos_sin
+
     if ubatch_slices and ubatch_slices[ubatch_num]:
         token_slice = ubatch_slices[ubatch_num].token_slice
         positions = positions[token_slice]
@@ -293,7 +290,8 @@ def create_ascend_forward_context(
             ubatch_slices[ubatch_num].request_slice.start *
             decode_token_per_req,
             ubatch_slices[ubatch_num].request_slice.stop *
-            decode_token_per_req)
+            decode_token_per_req,
+        )
         update_cos_sin(positions)
         cos_slice, sin_slice = get_cos_and_sin_slice()
         new_forward_context.cos = cos_slice.clone(
