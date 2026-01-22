@@ -22,8 +22,7 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     chunked_prefill_workspace_size = min(
         # Make sure there is enough for 8 full length request or at least
         # 4 pages of cache per request
-        max(8 * model_config.max_model_len,
-            4 * scheduler_config.max_num_seqs * cache_config.block_size),
+        max(8 * model_config.max_model_len, 4 * scheduler_config.max_num_seqs * cache_config.block_size),
         # For long-context models try not to over-allocate limiting
         # kv-cache space, limiting it to 128k tokens,
         # which would result in the workspace being:
@@ -146,16 +145,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
-    def unpadded(self, num_actual_tokens: int,
-                 num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
+    def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
         # This only use to eagle now. It will be use to enforce_eager in future.
         return AscendCommonAttentionMetadata(
-            query_start_loc=self.query_start_loc[:num_actual_reqs + 1],
-            query_start_loc_cpu=self.query_start_loc_cpu[:num_actual_reqs + 1],
+            query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
             seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
-            num_computed_tokens_cpu=self.
-            num_computed_tokens_cpu[:num_actual_reqs],
+            num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs],
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
@@ -171,8 +168,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
-            prefill_context_parallel_metadata=self.
-            prefill_context_parallel_metadata,
+            prefill_context_parallel_metadata=self.prefill_context_parallel_metadata,
             max_seq_len=self.max_seq_len,
         )
 
@@ -190,14 +186,15 @@ def filter_chunked_req_indices(
     Returns:
         filtered_indices: the real chunked req's indices
     """
-    assert mask_for_non_zero_chunk is not None and len(seq_len) == len(
-        mask_for_non_zero_chunk)
+    assert mask_for_non_zero_chunk is not None and len(seq_len) == len(mask_for_non_zero_chunk)
     offsets = torch.cumsum(torch.cat([torch.tensor([0]), seq_len[:-1]]), dim=0)
-    filtered_indices = torch.cat([
-        torch.arange(offsets[i], offsets[i] + seq_len[i])
-        for i in range(len(mask_for_non_zero_chunk))
-        if mask_for_non_zero_chunk[i]
-    ])
+    filtered_indices = torch.cat(
+        [
+            torch.arange(offsets[i], offsets[i] + seq_len[i])
+            for i in range(len(mask_for_non_zero_chunk))
+            if mask_for_non_zero_chunk[i]
+        ]
+    )
     return filtered_indices
 
 
@@ -233,8 +230,7 @@ def split_decodes_and_prefills(
     if max_query_len <= decode_threshold:
         return num_reqs, 0, num_tokens, 0
 
-    query_lens = (query_start_loc[1:] - query_start_loc[:-1]
-                  ) if query_lens_pcp_full is None else query_lens_pcp_full
+    query_lens = (query_start_loc[1:] - query_start_loc[:-1]) if query_lens_pcp_full is None else query_lens_pcp_full
     is_prefill = query_lens > decode_threshold
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
@@ -289,8 +285,7 @@ def trans_rope_weight(weight, rope_dim):
         return weight.contiguous()
     nope_part = weight[..., :-rope_dim, :]
     rope_part = weight[..., -rope_dim:, :]
-    reordered_rope_part = torch.cat(
-        (rope_part[..., ::2, :], rope_part[..., 1::2, :]), dim=-2)
+    reordered_rope_part = torch.cat((rope_part[..., ::2, :], rope_part[..., 1::2, :]), dim=-2)
     return torch.cat((nope_part, reordered_rope_part), dim=-2).contiguous()
 
 
@@ -303,14 +298,11 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
     nz_mat = torch.permute(
         torch.reshape(
             nd_mat,
-            (r // block_size[0], block_size[0], c // block_size[1],
-             block_size[1]),
+            (r // block_size[0], block_size[0], c // block_size[1], block_size[1]),
         ),
         [2, 0, 1, 3],
     )
-    nz_mat = torch.reshape(
-        nz_mat,
-        (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3]))
+    nz_mat = torch.reshape(nz_mat, (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3]))
     return nz_mat
 
 

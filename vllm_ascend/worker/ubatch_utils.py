@@ -78,6 +78,7 @@ def create_ubatch_slices(num_scheduled_tokens: np.ndarray, token_split_points: l
             token_slice = slice(cu_num_tokens[req_start],
                                 cu_num_tokens[req_stop])
             ubatch_slices.append(UBatchSlice(req_slice, token_slice))
+            start_token = end_token
 
     return ubatch_slices
 
