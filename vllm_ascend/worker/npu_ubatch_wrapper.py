@@ -2,18 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import (get_pp_group,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_gather)
-from vllm.distributed.device_communicators.pynccl_allocator import \
-    set_graph_pool_id
-from vllm.forward_context import (DPMetadata, get_forward_context,
-                                  override_forward_context)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
+from vllm.forward_context import DPMetadata, get_forward_context, override_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -42,24 +39,22 @@ class AscendNPUGraphMetaData:
 
 
 class NPUCoreControlContextManager:
-
-    def __init__(self, comm_aiv_core: int, comm_aic_core: int,
-                 curren_stream: Any):
+    def __init__(self, comm_aiv_core: int, comm_aic_core: int, curren_stream: Any):
         """
-        Context manager for controlling aiv/aic core num. 
+        Context manager for controlling aiv/aic core num.
         Upon entering the context, it sets the number of cores
         allocated for communication and computation to comm_core and
         total_cores - comm_core respectively. Upon exiting, it restores the
         allocation to use all available npu cores.
 
         Args:
-            comm_aiv_core (int): The number of aiv cores to allocate for communication. 
+            comm_aiv_core (int): The number of aiv cores to allocate for communication.
                 (The remainder will be used for computation.)
-            comm_aic_core (int): The number of aic cores to allocate for communication. 
+            comm_aic_core (int): The number of aic cores to allocate for communication.
                 (The remainder will be used for computation.)
-            set_comm_core_limit (Callable[[int], None]): 
+            set_comm_core_limit (Callable[[int], None]):
                 A function that sets the number of aiv/aic for communication.
-            set_compute_core_limit (Callable[[int], None]): 
+            set_compute_core_limit (Callable[[int], None]):
                 A function that sets the number of aiv/aic for computation.
         """
 
@@ -78,25 +73,23 @@ class NPUCoreControlContextManager:
         self.current_stream = curren_stream
 
     def __enter__(self):
-        torch.npu.set_stream_limit(self.current_stream,
-                                   cube_num=self.comm_aic_core,
-                                   vector_num=self.comm_aiv_core)
+        torch.npu.set_stream_limit(self.current_stream, cube_num=self.comm_aic_core, vector_num=self.comm_aiv_core)
 
     def __exit__(self, exc_type, exc_value, traceback):
         torch.npu.reset_stream_limit(self.current_stream)
 
 
 class AscendUBatchWrapper(UBatchWrapper):
-
-    def __init__(self, runnable: Callable, vllm_config: VllmConfig,
-                 runtime_mode: CUDAGraphMode, device: torch.npu.device):
+    def __init__(
+        self, runnable: Callable, vllm_config: VllmConfig, runtime_mode: CUDAGraphMode, device: torch.npu.device
+    ):
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.comm_stream = torch.npu.Stream(device=device)
         # Ubatch threads plus the main thread
         # TODO(zxdu): update it at v0.14.0
-        if hasattr(self.vllm_config.parallel_config, 'num_ubatches'):
+        if hasattr(self.vllm_config.parallel_config, "num_ubatches"):
             num_ubatches = self.vllm_config.parallel_config.num_ubatches
         else:
             num_ubatches = 2
@@ -107,9 +100,7 @@ class AscendUBatchWrapper(UBatchWrapper):
         self.cudagraph_wrapper = None
         self.graph_pool = None
         if runtime_mode is not CUDAGraphMode.NONE:
-            self.cudagraph_wrapper = ACLGraphWrapper(runnable,
-                                                     vllm_config,
-                                                     runtime_mode=runtime_mode)
+            self.cudagraph_wrapper = ACLGraphWrapper(runnable, vllm_config, runtime_mode=runtime_mode)
             self.graph_pool = current_platform.get_global_graph_pool()
 
         self.device = device
@@ -119,8 +110,7 @@ class AscendUBatchWrapper(UBatchWrapper):
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
-        raise AttributeError(f"Attribute {key} not exists in the runnable of "
-                             f"cudagraph wrapper: {self.runnable}")
+        raise AttributeError(f"Attribute {key} not exists in the runnable of cudagraph wrapper: {self.runnable}")
 
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
@@ -135,14 +125,14 @@ class AscendUBatchWrapper(UBatchWrapper):
         the graph capture.
 
         The flow is as follows:
-        1. The main thread starts up each ubatch thread. Each thread will 
+        1. The main thread starts up each ubatch thread. Each thread will
         initialize its cuda context (torch.cuda.current_blas_handle())
         before going to sleep upon entering the ubatch_context.
 
-        2. The main thread starts the graph capture and wakes up the first 
+        2. The main thread starts the graph capture and wakes up the first
         ubatch thread.
 
-        3. Each ubatch thread runs the model to completion and returns the 
+        3. Each ubatch thread runs the model to completion and returns the
         completed output tensors back to the main thread.
 
         4. The main thread stores the captured cudagraph along with its metadata
@@ -169,36 +159,34 @@ class AscendUBatchWrapper(UBatchWrapper):
 
         results: list[tuple[int, torch.Tensor]] = []
         compute_stream = ubatch_metadata[0].context.compute_stream
-        num_tokens = ubatch_metadata[0].num_tokens + \
-            ubatch_metadata[1].num_tokens
+        num_tokens = ubatch_metadata[0].num_tokens + ubatch_metadata[1].num_tokens
 
         # Ubatches will manually manage the forward context, so we override
         # it to None here so we can have it restored correctly later
         with override_forward_context(None):
             ubatch_threads = []
             for metadata in ubatch_metadata:
-                thread = threading.Thread(target=_capture_ubatch_thread,
-                                          args=(
-                                              results,
-                                              metadata,
-                                          ))
+                thread = threading.Thread(
+                    target=_capture_ubatch_thread,
+                    args=(
+                        results,
+                        metadata,
+                    ),
+                )
                 ubatch_threads.append(thread)
                 thread.start()
             self.ready_barrier.wait()  # Wait for both threads to be ready
 
             # Capture the cudagraph
-            cudagraph_metadata = \
-                AscendNPUGraphMetaData(
-                            aclgraph=torch.npu.NPUGraph(),
-                            ubatch_metadata=ubatch_metadata,
-                        )
+            cudagraph_metadata = AscendNPUGraphMetaData(
+                aclgraph=torch.npu.NPUGraph(),
+                ubatch_metadata=ubatch_metadata,
+            )
             if self.graph_pool is not None:
                 set_graph_pool_id(self.graph_pool)
             else:
                 set_graph_pool_id(current_platform.graph_pool_handle())
-            with torch.npu.graph(cudagraph_metadata.aclgraph,
-                                 stream=compute_stream,
-                                 pool=self.graph_pool):
+            with torch.npu.graph(cudagraph_metadata.aclgraph, stream=compute_stream, pool=self.graph_pool):
                 ubatch_metadata[0].context.cpu_wait_event.set()
                 for thread in ubatch_threads:
                     thread.join()
@@ -209,7 +197,6 @@ class AscendUBatchWrapper(UBatchWrapper):
         return cudagraph_metadata.outputs
 
     def _run_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
-
         @torch.inference_mode()
         def _ubatch_thread(results, model, ubatch_metadata):
             with ubatch_metadata.context:
@@ -238,12 +225,14 @@ class AscendUBatchWrapper(UBatchWrapper):
         with override_forward_context(None):
             ubatch_threads = []
             for metadata in ubatch_metadata:
-                thread = threading.Thread(target=_ubatch_thread,
-                                          args=(
-                                              results,
-                                              model,
-                                              metadata,
-                                          ))
+                thread = threading.Thread(
+                    target=_ubatch_thread,
+                    args=(
+                        results,
+                        model,
+                        metadata,
+                    ),
+                )
                 ubatch_threads.append(thread)
                 thread.start()
             self.ready_barrier.wait()  # Wait for both threads to be ready
@@ -254,8 +243,7 @@ class AscendUBatchWrapper(UBatchWrapper):
         # if enable sp, we should unpad the model output first
         if get_forward_context().sp_enabled and get_pp_group().is_last_rank:
             for i in range(2):
-                sorted_results[i] = tensor_model_parallel_all_gather(
-                    sorted_results[i], 0)
+                sorted_results[i] = tensor_model_parallel_all_gather(sorted_results[i], 0)
 
                 pad_size = ubatch_metadata[i].context.forward_context.pad_size
                 if pad_size > 0:
@@ -270,11 +258,18 @@ class AscendUBatchWrapper(UBatchWrapper):
         return result
 
     def _make_ubatch_metadata(
-            self, ubatch_slices, attn_metadata, input_ids, positions,
-            inputs_embeds, intermediate_tensors, compute_stream, dp_metadata,
-            batch_descriptor,
-            cudagraph_runtime_mode) -> list[AscendUbatchMetadata]:
-
+        self,
+        ubatch_slices,
+        attn_metadata,
+        input_ids,
+        positions,
+        inputs_embeds,
+        intermediate_tensors,
+        compute_stream,
+        dp_metadata,
+        batch_descriptor,
+        cudagraph_runtime_mode,
+    ) -> list[AscendUbatchMetadata]:
         # Create one forward context per ubatch
 
         forward_contexts = []
@@ -285,8 +280,7 @@ class AscendUBatchWrapper(UBatchWrapper):
             forward_contexts.append(
                 create_ascend_forward_context(
                     cur_forward_context,
-                    attn_metadata=attn_metadata[i]
-                    if attn_metadata is not None else None,
+                    attn_metadata=attn_metadata[i] if attn_metadata is not None else None,
                     vllm_config=self.vllm_config,
                     dp_metadata=dp_metadata[i],
                     ubatch_slices=ubatch_slices,
@@ -295,22 +289,24 @@ class AscendUBatchWrapper(UBatchWrapper):
                     ubatch_num=i,
                     positions=positions,
                     dbo_template=dbo_template,
-                ))
+                )
+            )
 
         ubatch_ctxs = make_ubatch_contexts(
             num_micro_batches=len(ubatch_slices),
             comm_stream=self.comm_stream,
             compute_stream=compute_stream,
             forward_contexts=forward_contexts,
-            ready_barrier=self.ready_barrier)
+            ready_barrier=self.ready_barrier,
+        )
 
         ubatch_metadata: list[AscendUbatchMetadata] = []
         for i, ubatch_slice in enumerate(ubatch_slices):
-            sliced_input_ids, sliced_positions, sliced_inputs_embeds, \
-            sliced_intermediate_tensors = \
+            sliced_input_ids, sliced_positions, sliced_inputs_embeds, sliced_intermediate_tensors = (
                 self._slice_model_inputs(
-                    ubatch_slice.token_slice, input_ids, positions,
-                    inputs_embeds, intermediate_tensors)
+                    ubatch_slice.token_slice, input_ids, positions, inputs_embeds, intermediate_tensors
+                )
+            )
             ubatch_metadata.append(
                 AscendUbatchMetadata(
                     context=ubatch_ctxs[i],
@@ -318,13 +314,13 @@ class AscendUBatchWrapper(UBatchWrapper):
                     positions=sliced_positions,
                     inputs_embeds=sliced_inputs_embeds,
                     intermediate_tensors=sliced_intermediate_tensors,
-                    num_tokens=ubatch_slice.token_slice.stop -
-                    ubatch_slice.token_slice.start))
+                    num_tokens=ubatch_slice.token_slice.stop - ubatch_slice.token_slice.start,
+                )
+            )
 
         return ubatch_metadata
 
-    def _slice_model_inputs(self, tokens_slice: slice, input_ids, positions,
-                            inputs_embeds, intermediate_tensors):
+    def _slice_model_inputs(self, tokens_slice: slice, input_ids, positions, inputs_embeds, intermediate_tensors):
         sliced_input_ids = input_ids[tokens_slice]
         # if we are using mrope. Mrope adds an additional dimension to the
         # positions tensor
@@ -332,8 +328,7 @@ class AscendUBatchWrapper(UBatchWrapper):
             sliced_positions = positions[:, tokens_slice]
         else:
             sliced_positions = positions[tokens_slice]
-        sliced_inputs_embeds = inputs_embeds[
-            tokens_slice] if inputs_embeds else None
+        sliced_inputs_embeds = inputs_embeds[tokens_slice] if inputs_embeds else None
         # consider pp scenario
         if intermediate_tensors is not None:
             # if enable sp, dbo should not split intermediate tensors using token_slice
@@ -342,19 +337,16 @@ class AscendUBatchWrapper(UBatchWrapper):
                 tp_size = get_tensor_model_parallel_world_size()
                 start = (tokens_slice.start + tp_size - 1) // tp_size
                 if start != 0:
-                    stop = start + (tokens_slice.stop - tokens_slice.start +
-                                    tp_size - 1) // tp_size
+                    stop = start + (tokens_slice.stop - tokens_slice.start + tp_size - 1) // tp_size
                 else:
                     stop = (tokens_slice.stop + tp_size - 1) // tp_size
                 tokens_slice = slice(start, stop)
 
-            sliced_intermediate_tensors = intermediate_tensors[
-                tokens_slice] if intermediate_tensors else None
+            sliced_intermediate_tensors = intermediate_tensors[tokens_slice] if intermediate_tensors else None
         else:
             sliced_intermediate_tensors = None
 
-        return (sliced_input_ids, sliced_positions, sliced_inputs_embeds,
-                sliced_intermediate_tensors)
+        return (sliced_input_ids, sliced_positions, sliced_inputs_embeds, sliced_intermediate_tensors)
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -364,7 +356,6 @@ class AscendUBatchWrapper(UBatchWrapper):
 
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
-
             # This is to account for the case where ubatching was aborted.
             # When we capture full graphs we only capture one graph per shape,
             # meaning that if we have a ubatched  cudagraph for the current
@@ -376,20 +367,18 @@ class AscendUBatchWrapper(UBatchWrapper):
                 if batch_descriptor.num_tokens in self.cudagraphs:
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
 
-            if cudagraph_runtime_mode in (CUDAGraphMode.NONE,
-                                          CUDAGraphMode.PIECEWISE):
+            if cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
                 return self.runnable(*args, **kwargs)
             else:
                 assert self.cudagraph_wrapper is not None
                 return self.cudagraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
-        num_tokens = (ubatch_slices[0].token_slice.stop -
-                      ubatch_slices[0].token_slice.start) * 2
-        input_ids = kwargs['input_ids']
-        positions = kwargs['positions']
-        intermediate_tensors = kwargs['intermediate_tensors']
-        inputs_embeds = kwargs['inputs_embeds']
+        num_tokens = (ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start) * 2
+        input_ids = kwargs["input_ids"]
+        positions = kwargs["positions"]
+        intermediate_tensors = kwargs["intermediate_tensors"]
+        inputs_embeds = kwargs["inputs_embeds"]
         compute_stream = torch.npu.current_stream()
 
         ubatch_dp_metadata = []
@@ -398,21 +387,19 @@ class AscendUBatchWrapper(UBatchWrapper):
         for ubatch_slice in ubatch_slices:
             if dp_size > 1:
                 ubatch_num_tokens_across_dp = torch.tensor(
-                    [ubatch_slice.num_tokens] * dp_size,
-                    device="cpu",
-                    dtype=torch.int32)
+                    [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
+                )
                 ubatch_dp_metadata.append(
                     DPMetadata.make(
                         self.vllm_config.parallel_config,
                         ubatch_slice.num_tokens,
                         ubatch_num_tokens_across_dp,
-                    ))
+                    )
+                )
             else:
                 ubatch_dp_metadata.append(None)
 
-
-        if num_tokens not in self.cudagraphs \
-            and cudagraph_runtime_mode is CUDAGraphMode.FULL:
+        if num_tokens not in self.cudagraphs and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
@@ -421,16 +408,15 @@ class AscendUBatchWrapper(UBatchWrapper):
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
                 # npu graph should be captured in non-default stream
-                #compute_stream=compute_stream,
-                compute_stream=torch.npu.Stream(
-                    device=torch.npu.current_device()),
+                # compute_stream=compute_stream,
+                compute_stream=torch.npu.Stream(device=torch.npu.current_device()),
                 # after padding for cudagraph
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE)
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            )
             return self._capture_ubatches(ubatch_metadata, self.model)
-        elif num_tokens in self.cudagraphs \
-            and cudagraph_runtime_mode is CUDAGraphMode.FULL:
+        elif num_tokens in self.cudagraphs and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             cudagraph_metadata = self.cudagraphs[num_tokens]
             cudagraph_metadata.aclgraph.replay()
             return cudagraph_metadata.outputs
@@ -445,19 +431,17 @@ class AscendUBatchWrapper(UBatchWrapper):
                 compute_stream=compute_stream,
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE)
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            )
             return self._run_ubatches(ubatch_metadata, self.model)
 
     def _merge_intermediate_tensors(self, intermediate_tensor_list):
-
         assert len(intermediate_tensor_list) == 2
         result = {}
         for key in intermediate_tensor_list[0].tensors:
-            result[key] = torch.cat([
-                intermediate_tensor_list[0].tensors[key],
-                intermediate_tensor_list[1].tensors[key]
-            ],
-                                    dim=0)
+            result[key] = torch.cat(
+                [intermediate_tensor_list[0].tensors[key], intermediate_tensor_list[1].tensors[key]], dim=0
+            )
 
         res = IntermediateTensors(result)
         return res

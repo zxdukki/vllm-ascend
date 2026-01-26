@@ -78,11 +78,13 @@ from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
                                              GPUModelRunner)
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.ubatch_utils import UBatchSlices
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, is_residual_scattered_for_sp
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_attn_metadata, using_paged_attention
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         split_attn_metadata,
+                                         using_paged_attention)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
@@ -369,6 +371,8 @@ class NPUModelRunner(GPUModelRunner):
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
+        # Ubatch slices
+        self.ubatch_slices = None
 
     @property
     def use_cp(self) -> bool:
@@ -1243,6 +1247,50 @@ class NPUModelRunner(GPUModelRunner):
 
         return draft_token_ids
 
+
+    def sync_and_slice_intermediate_tensors(
+        self,
+        num_tokens: int,
+        intermediate_tensors: IntermediateTensors | None,
+        sync_self: bool,
+    ) -> IntermediateTensors:
+        assert self.intermediate_tensors is not None
+        tp = self.vllm_config.parallel_config.tensor_parallel_size
+        is_rs = enable_sp(self.vllm_config)
+
+        # When sequence parallelism is enabled, the "residual" tensor is sharded
+        # across tensor parallel ranks, so each rank only needs its own slice.
+        if sync_self:
+            assert intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                if self.ubatch_slices is None:
+                    copy_len = num_tokens // tp if is_rs else num_tokens
+                else:
+                    # TODO: check ubatch is padded or not
+                    copy_len = (
+                        (self.ubatch_slices[0].num_tokens + tp - 1) // tp) + (
+                            (self.ubatch_slices[1].num_tokens + tp - 1) //
+                            tp) if is_rs else (
+                                self.ubatch_slices[0].num_tokens +
+                                self.ubatch_slices[1].num_tokens)
+                    intermediate_tensor_size = next(
+                        iter(self.intermediate_tensors.tensors.values())).size(
+                            0)
+                    if intermediate_tensor_size < copy_len:
+                        self.intermediate_tensors = (
+                            self.model.make_empty_intermediate_tensors(
+                                batch_size=copy_len,
+                                dtype=self.dtype,
+                                device=self.device))
+
+                self.intermediate_tensors[k][:copy_len].copy_(
+                    v[:copy_len], non_blocking=True)
+
+        return IntermediateTensors({
+            k: v[:copy_len]
+            for k, v in self.intermediate_tensors.items()
+        })
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1365,7 +1413,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded,
                     self.parallel_config.num_ubatches,
                 )
-
+                self.ubatch_slices = ubatch_slices
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0

@@ -31,17 +31,19 @@ class AscendUBatchContext(UBatchContext):
     Context manager for micro-batching synchronization using threading events.
     """
 
-    def __init__(self,
-                 id: int,
-                 comm_stream: torch.npu.Stream,
-                 compute_stream: torch.npu.Stream,
-                 forward_context: ForwardContext,
-                 ready_barrier: threading.Barrier,
-                 cpu_wait_event: threading.Event,
-                 cpu_signal_event: threading.Event,
-                 gpu_comm_done_event: dict[UBatchEventKey, torch.npu.Event],
-                 gpu_compute_done_event: dict[UBatchEventKey, torch.npu.Event],
-                 schedule: str = "default"):
+    def __init__(
+        self,
+        id: int,
+        comm_stream: torch.npu.Stream,
+        compute_stream: torch.npu.Stream,
+        forward_context: ForwardContext,
+        ready_barrier: threading.Barrier,
+        cpu_wait_event: threading.Event,
+        cpu_signal_event: threading.Event,
+        gpu_comm_done_event: dict[UBatchEventKey, torch.npu.Event],
+        gpu_compute_done_event: dict[UBatchEventKey, torch.npu.Event],
+        schedule: str = "default",
+    ):
         self.id = id
         self.comm_stream = comm_stream
         self.compute_stream = compute_stream
@@ -59,10 +61,8 @@ class AscendUBatchContext(UBatchContext):
         self.comm_vector_core = envs.VLLM_ASCEND_DBO_COMM_AIV_NUM
         # get the total core num
         props = torch.npu.get_device_limit(torch.npu.current_device())
-        self.comp_cube_core = props[
-            "cube_core_num"] - self.comm_cube_core if self.comm_cube_core != -1 else -1
-        self.comp_vector_core = props[
-            "vector_core_num"] - self.comm_vector_core if self.comm_vector_core != -1 else -1
+        self.comp_cube_core = props["cube_core_num"] - self.comm_cube_core if self.comm_cube_core != -1 else -1
+        self.comp_vector_core = props["vector_core_num"] - self.comm_vector_core if self.comm_vector_core != -1 else -1
 
     def __enter__(self):
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
@@ -130,22 +130,20 @@ class AscendUBatchContext(UBatchContext):
     def record_current_stream(self, event=UBatchEventKey.DEFAULT):
         # set core limit for communication block
         if self.comm_cube_core != -1 or self.comm_vector_core != -1:
-            torch.npu.set_stream_limit(dbo_current_stream(),
-                                       cube_num=self.comm_cube_core,
-                                       vector_num=self.comm_vector_core)
+            torch.npu.set_stream_limit(
+                dbo_current_stream(), cube_num=self.comm_cube_core, vector_num=self.comm_vector_core
+            )
         self._signal_compute_done(event)
 
-    def wait_current_stream_and_yield(self,
-                                      event=UBatchEventKey.DEFAULT,
-                                      wait: bool = True):
+    def wait_current_stream_and_yield(self, event=UBatchEventKey.DEFAULT, wait: bool = True):
         if wait:
             self._wait_compute_done(event)
         self._cpu_yield()
         # set core limit for comp part
         if self.comm_cube_core != -1 or self.comm_vector_core != -1:
-            torch.npu.set_stream_limit(dbo_current_stream(),
-                                       cube_num=self.comp_cube_core,
-                                       vector_num=self.comp_vector_core)
+            torch.npu.set_stream_limit(
+                dbo_current_stream(), cube_num=self.comp_cube_core, vector_num=self.comp_vector_core
+            )
 
     def yield_(self):
         self.current_stream = dbo_current_stream()
@@ -153,8 +151,7 @@ class AscendUBatchContext(UBatchContext):
 
     # switch func for two stream overlap
     # 1. yield from stream 1 thread1 to stream2 thread2
-    def yield_and_switch_from_compute_to_comm(self,
-                                              event=UBatchEventKey.DEFAULT):
+    def yield_and_switch_from_compute_to_comm(self, event=UBatchEventKey.DEFAULT):
         assert dbo_current_stream() == self.compute_stream
         self._signal_compute_done(event)
         self._cpu_yield()
@@ -163,8 +160,7 @@ class AscendUBatchContext(UBatchContext):
         self._wait_compute_done(event)
 
     # 1. yield from stream 2 thread2 to stream1 thread1
-    def yield_and_switch_from_comm_to_compute(self,
-                                              event=UBatchEventKey.DEFAULT):
+    def yield_and_switch_from_comm_to_compute(self, event=UBatchEventKey.DEFAULT):
         assert dbo_current_stream() == self.comm_stream
         self._signal_comm_done(event)
         self._cpu_yield()
@@ -174,7 +170,6 @@ class AscendUBatchContext(UBatchContext):
 
 
 def _register_ubatch_function(func):
-
     def wrapper(*args, **kwargs):
         if len(_THREAD_ID_TO_CONTEXT) > 0:
             ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
@@ -184,26 +179,21 @@ def _register_ubatch_function(func):
     return wrapper
 
 
-dbo_maybe_run_recv_hook = _register_ubatch_function(
-    AscendUBatchContext.maybe_run_recv_hook)
+dbo_maybe_run_recv_hook = _register_ubatch_function(AscendUBatchContext.maybe_run_recv_hook)
 dbo_yield = _register_ubatch_function(AscendUBatchContext.yield_)
 dbo_yield_and_switch_from_compute_to_comm = _register_ubatch_function(
-    AscendUBatchContext.yield_and_switch_from_compute_to_comm)
+    AscendUBatchContext.yield_and_switch_from_compute_to_comm
+)
 dbo_yield_and_switch_from_comm_to_compute = _register_ubatch_function(
-    AscendUBatchContext.yield_and_switch_from_comm_to_compute)
-dbo_switch_to_comm = _register_ubatch_function(
-    AscendUBatchContext.switch_to_comm)
-dbo_switch_to_compute = _register_ubatch_function(
-    AscendUBatchContext.switch_to_compute)
-dbo_switch_to_comm_sync = _register_ubatch_function(
-    AscendUBatchContext.switch_to_comm_sync)
-dbo_switch_to_compute_sync = _register_ubatch_function(
-    AscendUBatchContext.switch_to_compute_sync)
+    AscendUBatchContext.yield_and_switch_from_comm_to_compute
+)
+dbo_switch_to_comm = _register_ubatch_function(AscendUBatchContext.switch_to_comm)
+dbo_switch_to_compute = _register_ubatch_function(AscendUBatchContext.switch_to_compute)
+dbo_switch_to_comm_sync = _register_ubatch_function(AscendUBatchContext.switch_to_comm_sync)
+dbo_switch_to_compute_sync = _register_ubatch_function(AscendUBatchContext.switch_to_compute_sync)
 
-dbo_record_current_stream = _register_ubatch_function(
-    AscendUBatchContext.record_current_stream)
-dbo_wait_current_stream_and_yield = _register_ubatch_function(
-    AscendUBatchContext.wait_current_stream_and_yield)
+dbo_record_current_stream = _register_ubatch_function(AscendUBatchContext.record_current_stream)
+dbo_wait_current_stream_and_yield = _register_ubatch_function(AscendUBatchContext.wait_current_stream_and_yield)
 
 
 def dbo_get_previous_event(func, *args, **kwargs):
@@ -229,25 +219,20 @@ def make_ubatch_contexts(
     _NUM_UBATCHES = num_micro_batches
     # Ensure the global context list is large enough
     if len(_CURRENT_CONTEXTS) < num_micro_batches:
-        _CURRENT_CONTEXTS.extend([None] *
-                                 (num_micro_batches - len(_CURRENT_CONTEXTS)))
+        _CURRENT_CONTEXTS.extend([None] * (num_micro_batches - len(_CURRENT_CONTEXTS)))
     """
     Create a context manager for micro-batching synchronization.
     """
     key_list = [
-        UBatchEventKey.ATTN_PRE, UBatchEventKey.ATTN_POST,
-        UBatchEventKey.MOE_DISPATCH, UBatchEventKey.MOE_COMBINE,
-        UBatchEventKey.DEFAULT
+        UBatchEventKey.ATTN_PRE,
+        UBatchEventKey.ATTN_POST,
+        UBatchEventKey.MOE_DISPATCH,
+        UBatchEventKey.MOE_COMBINE,
+        UBatchEventKey.DEFAULT,
     ]
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
-    gpu_comm_done_events = [{
-        key: torch.npu.Event()
-        for key in key_list
-    } for _ in range(num_micro_batches)]
-    gpu_compute_done_events = [{
-        key: torch.npu.Event()
-        for key in key_list
-    } for _ in range(num_micro_batches)]
+    gpu_comm_done_events = [{key: torch.npu.Event() for key in key_list} for _ in range(num_micro_batches)]
+    gpu_compute_done_events = [{key: torch.npu.Event() for key in key_list} for _ in range(num_micro_batches)]
 
     ctxs = []
     current_microbatch_stream = compute_stream
@@ -269,7 +254,8 @@ def make_ubatch_contexts(
             cpu_signal_event=cpu_events[(i + 1) % num_micro_batches],
             gpu_comm_done_event=gpu_comm_done_events[i],
             gpu_compute_done_event=gpu_compute_done_events[i],
-            schedule=schedule)
+            schedule=schedule,
+        )
         ctxs.append(ctx)
 
     return ctxs
