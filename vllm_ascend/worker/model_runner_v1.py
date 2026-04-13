@@ -2259,6 +2259,8 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 input_ids=input_ids,
+                # TODO(zxdu):check it, if we use padded ubatch here but use unpadded ubatch in attn split
+                # shape errors may occurs
                 ubatch_slices=ubatch_slices_padded,
             ),
             self.maybe_get_kv_connector_output(
