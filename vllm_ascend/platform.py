@@ -1172,21 +1172,6 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.parallel_config.numa_bind_cpus = None
 
-            if getattr(vllm_config.parallel_config, "enable_dbo", False):
-                logger.warning(
-                    "Parameter is currently ignored on Ascend. parameter=enable_dbo, action: resetting to False. "
-                )
-                vllm_config.parallel_config.enable_dbo = False
-
-            ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
-            if ubatch_size != 0:
-                logger.warning(
-                    "Parameter is currently ignored on Ascend. "
-                    "parameter=ubatch_size, value=%d, action: resetting to 0. ",
-                    ubatch_size,
-                )
-                vllm_config.parallel_config.ubatch_size = 0
-
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
