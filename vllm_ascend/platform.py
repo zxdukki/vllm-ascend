@@ -1172,6 +1172,19 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.parallel_config.numa_bind_cpus = None
 
+            # DBO and PCP are not compatible; disable DBO when PCP is enabled.
+            if (
+                getattr(vllm_config.parallel_config, "enable_dbo", False)
+                and getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1) > 1
+            ):
+                logger.warning(
+                    "DBO (Dual Batch Overlap) is not compatible with PCP "
+                    "(Prefill Context Parallel). Disabling DBO "
+                    "(enable_dbo=False, ubatch_size=0)."
+                )
+                vllm_config.parallel_config.enable_dbo = False
+                vllm_config.parallel_config.ubatch_size = 0
+
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True

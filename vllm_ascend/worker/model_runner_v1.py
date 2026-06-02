@@ -159,8 +159,8 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.npu_ubatch_wrapper import AscendUBatchWrapper
 from vllm_ascend.worker.pcp_utils import PCPManager
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
 from vllm_ascend.worker.ubatch_utils import check_enable_ubatch, maybe_create_ubatch_slices
+from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
